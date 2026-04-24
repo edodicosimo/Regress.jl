@@ -17,18 +17,18 @@ rename!(rwm_data, [
 rwm_data[!, :visit_dummy] = ifelse.(rwm_data.docvis .> 0, 1, 0)
 
 
-X_i = rwm_data[:,Cols("age", "hhninc", "hhkids", "educ", "married")]
-X_i = Matrix(X_i)
-y = Matrix(rwm_data[:,Cols("visit_dummy")])
-β = [2,4,6,8,10]   
-eta = X_i*β
+X_i = rwm_data[:,Cols("age", "hhninc", "hhkids", "educ", "married")] #
+X_i = Matrix(X_i) #
+y = Matrix(rwm_data[:,Cols("visit_dummy")]) #
+β = [0,0,0,0,0]   #
+eta = X_i*β #
 
-v = log_likelihood_probit.(y,eta) #FIXME vengono una marea di 0, che comporta che z_i ha una marea di NaN(divisioni per 0)
+v = log_likelihood_probit.(y,eta) 
 gi = getindex.(v, 1)
 hi = getindex.(v, 2)
 
 z_i = eta .+ (gi./hi)
-ci = Matrix(rwm_data[:,Cols("id")])
+id = Matrix(rwm_data[:,Cols("id")])
 df = DataFrame(
     z = vec(z_i),
     y = vec(y),
@@ -38,18 +38,26 @@ df = DataFrame(
     x3 = X_i[:,3],
     x4 = X_i[:,4],
     x5 = X_i[:,5],
-    c = vec(ci)
+    id = vec(id)
 )
 
 
 m = Regress.ols(
     df,
-    @formula(z ~ x1 + x2 + x3 + x4 + x5 + fe(c));
+    @formula(z ~ x1 + x2 + x3 + x4 + x5 + fe(id));
     weights = :h,
     save = :fe,
 )
 
-beta_new = coef(m)                       # coefficienti delle x
+beta_new = coef(m)    #                   # coefficienti delle x, vettore
 alpha_new = Regress.fe(m; keepkeys = true) # fixed effects stimati, con chiave c
 ŷ = predict(m, df)                 
- 
+
+innerjoin(rwm_data, alpha_new, on=:id)
+
+fit_probit(
+    rwm_data,
+    [0,0,0,0,0],
+    10,
+    0.1
+)
