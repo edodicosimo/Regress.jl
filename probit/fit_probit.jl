@@ -17,14 +17,16 @@ function fit_probit(
     rwm_data = df
     beta = beta0
 
-    X_i = rwm_data[:,Cols("age", "hhninc", "hhkids", "educ", "married")] #
-    X_i = Matrix(X_i) #
-    y = Matrix(rwm_data[:,Cols("visit_dummy")])
     rwm_data.alpha_new .= 0
 
     for _ in 1:max_iter
+
+        y = Matrix(rwm_data[:,Cols("visit_dummy")])
+        X_i = rwm_data[:,Cols("age", "hhninc", "hhkids", "educ", "married")] #
+        X_i = Matrix(X_i) #
         alpha = rwm_data.alpha_new
         select!(rwm_data, Not(:alpha_new))
+
         eta = X_i * beta + alpha 
 
         v = log_likelihood_probit.(y,eta) 
@@ -55,8 +57,8 @@ function fit_probit(
 
         beta_new = coef(m)                       # coefficienti delle x
         alpha_new = Regress.fe(m; keepkeys = true) # fixed effects stimati, con chiave c
-        ŷ = predict(m, df)       
-        rwm_data = rename!(innerjoin(rwm_data, alpha_new, on=:id), :fe_id => :alpha_new)
+        hat_y = predict(m, df)       
+        rwm_data = dropmissing(rename!(leftjoin(rwm_data, unique(alpha_new, :id), on=:id), :fe_id => :alpha_new))
 
         if norm(beta - beta_new) < tolerance
             beta = beta_new

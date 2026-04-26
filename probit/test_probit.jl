@@ -53,11 +53,13 @@ beta_new = coef(m)    #                   # coefficienti delle x, vettore
 alpha_new = Regress.fe(m; keepkeys = true) # fixed effects stimati, con chiave c
 ŷ = predict(m, df)                 
 
-innerjoin(rwm_data, alpha_new, on=:id)
 
-fit_probit(
+leftjoin(rwm_data, unique(alpha_new, :id), on=:id)
+
+hatBeta = fit_probit(
     rwm_data,
     [0,0,0,0,0],
     100,
     0.01
 )
+
