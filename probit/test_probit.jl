@@ -58,6 +58,6 @@ innerjoin(rwm_data, alpha_new, on=:id)
 fit_probit(
     rwm_data,
     [0,0,0,0,0],
-    10,
-    0.1
+    100,
+    0.01
 )

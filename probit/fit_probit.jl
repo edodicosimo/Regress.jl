@@ -6,38 +6,7 @@ using StatsModels: @formula
 using StatsFuns
 using LinearAlgebra
 
-# for iter in 1:max_iter
 
-#     eta = X * beta + alpha
-
-#     p   = Phi(eta)
-#     pdf = phi(eta)
-
-#     g = score_probit_wrt_eta(y, p, pdf)
-#     h = neg_hessian_probit_wrt_eta(y, p, pdf)
-
-#     z = eta + g / h
-
-#     z_tilde = demeaning(z, fe, weights=h)
-#     X_tilde = demeaning(X, fe, weights=h)
-
-#     beta_new = weighted_least_squares(X_tilde, z_tilde, weights=h)
-
-#     r = z - X * beta_new
-#     alpha_new = recover_fixed_effects(r, fe, weights=h)
-
-#     if norm(beta_new - beta) < tol
-#         beta = beta_new
-#         alpha = alpha_new
-#         break
-#     end
-
-#     beta  = beta_new
-#     alpha = alpha_new
-
-# end
-
-# return beta, alpha
 
 function fit_probit(
     df,
@@ -51,12 +20,12 @@ function fit_probit(
     X_i = rwm_data[:,Cols("age", "hhninc", "hhkids", "educ", "married")] #
     X_i = Matrix(X_i) #
     y = Matrix(rwm_data[:,Cols("visit_dummy")])
-    rwm_data.alpha .= 0
+    rwm_data.alpha_new .= 0
 
     for _ in 1:max_iter
-        alpha = rwm_data.alpha
-        select!(rwm_data, Not(:alpha))
-        eta = X_i * beta + alpha
+        alpha = rwm_data.alpha_new
+        select!(rwm_data, Not(:alpha_new))
+        eta = X_i * beta + alpha 
 
         v = log_likelihood_probit.(y,eta) 
 
@@ -87,7 +56,7 @@ function fit_probit(
         beta_new = coef(m)                       # coefficienti delle x
         alpha_new = Regress.fe(m; keepkeys = true) # fixed effects stimati, con chiave c
         ŷ = predict(m, df)       
-        innerjoin(rwm_data, alpha_new, on=:id)
+        rwm_data = rename!(innerjoin(rwm_data, alpha_new, on=:id), :fe_id => :alpha_new)
 
         if norm(beta - beta_new) < tolerance
             beta = beta_new
@@ -113,7 +82,7 @@ function log_likelihood_probit(y,eta)
         g_i = exp(normlogpdf(eta)-normlogcdf(eta))
         h_i = g_i^2 + eta * g_i
     else
-        g_i = exp(normlogpdf(eta)-normlogccdf(eta)) 
+        g_i = - exp(normlogpdf(eta)-normlogccdf(eta)) 
         h_i = g_i^2 - eta*g_i
     end
     return (g_i, h_i)
