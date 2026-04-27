@@ -9,23 +9,25 @@ using LinearAlgebra
 
 
 function fit_probit(
-    df,
+    data,
+    formula:: FormulaTerm,
     beta0,
     max_iter,
     tolerance #if the difference between the old beta and the new one is below the tolerance stop 
 )
-    rwm_data = df
+
+    
     beta = beta0
 
-    rwm_data.alpha_new .= 0
+    data.alpha_new .= 0
 
     for _ in 1:max_iter
 
-        y = Matrix(rwm_data[:,Cols("visit_dummy")])
-        X_i = rwm_data[:,Cols("age", "hhninc", "hhkids", "educ", "married")] #
+        y = Matrix(data[:,Cols("visit_dummy")])
+        X_i = data[:,Cols("age", "hhninc", "hhkids", "educ", "married")] #
         X_i = Matrix(X_i) #
-        alpha = rwm_data.alpha_new
-        select!(rwm_data, Not(:alpha_new))
+        alpha = data.alpha_new
+        select!(data, Not(:alpha_new))
 
         eta = X_i * beta + alpha 
 
@@ -35,7 +37,7 @@ function fit_probit(
         hi = getindex.(v, 2)
 
         z_i = eta .+ (gi./hi) 
-        id = Matrix(rwm_data[:,Cols("id")])
+        id = Matrix(data[:,Cols("id")])
         df = DataFrame( #FIXME funziona solo con 5 regressori, va generalizzato
             z = vec(z_i),
             y = vec(y),
@@ -58,7 +60,7 @@ function fit_probit(
         beta_new = coef(m)                       # coefficienti delle x
         alpha_new = Regress.fe(m; keepkeys = true) # fixed effects stimati, con chiave c
         hat_y = predict(m, df)       
-        rwm_data = dropmissing(rename!(leftjoin(rwm_data, unique(alpha_new, :id), on=:id), :fe_id => :alpha_new))
+        data = dropmissing(rename!(leftjoin(data, unique(alpha_new, :id), on=:id), :fe_id => :alpha_new))
 
         if norm(beta - beta_new) < tolerance
             beta = beta_new

@@ -58,8 +58,25 @@ leftjoin(rwm_data, unique(alpha_new, :id), on=:id)
 
 hatBeta = fit_probit(
     rwm_data,
+    @formula(z ~ x1 + x2 + x3 + x4 + x5 + fe(id)),
     [0,0,0,0,0],
     100,
     0.01
 )
+data_prep = Regress.prepare_data(
+    df,
+    @formula(z ~ x1 + x2 + x3 + x4 + x5 + fe(id)),
+    nothing,
+    nothing,               # subset
+    :fe,                   # save
+    true,                  # drop_singletons
+    Threads.nthreads(),    # nthreads
+)
 
+subdf = Regress._create_subdf(df, data_prep.all_vars, data_prep.esample)
+contrasts = Dict{Symbol, Any}()
+s = schema(data_prep.formula, subdf, contrasts)
+formula_schema = apply_schema(data_prep.formula, s, Regress.OLSEstimator, data_prep.has_fe_intercept)
+y_raw = response(formula_schema, subdf)
+y = convert(Vector, y_raw)
+X = convert(Matrix, modelmatrix(formula_schema, subdf))
