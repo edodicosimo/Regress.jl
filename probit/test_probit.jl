@@ -2,8 +2,8 @@ include("fit_probit.jl")
 using CSV
 using DataFrames
 
-# Load a dataset
 
+# Load a dataset
 rwm_data = CSV.read("/Users/edoardodicosimo/Downloads/rwm.data", DataFrame, header=false, delim=' ', ignorerepeated=true)
 
 rename!(rwm_data, [
@@ -15,68 +15,16 @@ rename!(rwm_data, [
 
 # if id had done at least a visit in the year put 1 else 0
 rwm_data[!, :visit_dummy] = ifelse.(rwm_data.docvis .> 0, 1, 0)
+           
 
 
-X_i = rwm_data[:,Cols("age", "hhninc", "hhkids", "educ", "married")] #
-X_i = Matrix(X_i) #
-y = Matrix(rwm_data[:,Cols("visit_dummy")]) #
-β = [0,0,0,0,0]   #
-eta = X_i*β #
-
-v = log_likelihood_probit.(y,eta) 
-gi = getindex.(v, 1)
-hi = getindex.(v, 2)
-
-z_i = eta .+ (gi./hi)
-id = Matrix(rwm_data[:,Cols("id")])
-df = DataFrame(
-    z = vec(z_i),
-    y = vec(y),
-    h = vec(hi),
-    x1 = X_i[:,1],
-    x2 = X_i[:,2],
-    x3 = X_i[:,3],
-    x4 = X_i[:,4],
-    x5 = X_i[:,5],
-    id = vec(id)
-)
-
-
-m = Regress.ols(
-    df,
-    @formula(z ~ x1 + x2 + x3 + x4 + x5 + fe(id));
-    weights = :h,
-    save = :fe,
-)
-
-beta_new = coef(m)    #                   # coefficienti delle x, vettore
-alpha_new = Regress.fe(m; keepkeys = true) # fixed effects stimati, con chiave c
-ŷ = predict(m, df)                 
-
-
-leftjoin(rwm_data, unique(alpha_new, :id), on=:id)
-
-hatBeta = fit_probit(
+hatBeta,i,df,d = fit_probit(
     rwm_data,
-    @formula(z ~ x1 + x2 + x3 + x4 + x5 + fe(id)),
+    @formula(visit_dummy ~ age + hhninc + hhkids + educ + married + fe(id)),
     [0,0,0,0,0],
-    100,
-    0.01
-)
-data_prep = Regress.prepare_data(
-    df,
-    @formula(z ~ x1 + x2 + x3 + x4 + x5 + fe(id)),
-    nothing,
-    nothing,               # subset
-    :fe,                   # save
-    true,                  # drop_singletons
-    Threads.nthreads(),    # nthreads
+    1000,
+    0.000000001
 )
 
-subdf = Regress._create_subdf(df, data_prep.all_vars, data_prep.esample)
-contrasts = Dict{Symbol, Any}()
-s = schema(data_prep.formula, subdf, contrasts)
-formula_schema = apply_schema(data_prep.formula, s, Regress.OLSEstimator, data_prep.has_fe_intercept)
-y_raw = response(formula_schema, subdf)
-y = convert(Vector, y_raw)
-X = convert(Matrix, modelmatrix(formula_schema, subdf))
+hatBeta
+

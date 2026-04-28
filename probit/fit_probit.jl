@@ -2,76 +2,127 @@ using Distributions
 using DataFrames
 using Regress
 using Regress: fe
-using StatsModels: @formula
+using StatsModels
 using StatsFuns
 using LinearAlgebra
+
+
+function select_columns(df::DataFrame, formula::FormulaTerm)
+    formulanofe = remove_fixedeffects(formula)
+    formula = ignore_fe(formula)
+    
+    y = modelcols(formula.lhs,df)
+    X = modelcols(formula.rhs,df)
+    
+    Xnofe = modelcols(formulanofe.rhs,df)
+
+    schema = StatsModels.schema(formula, df)
+    f_s = apply_schema(formula,schema)
+
+    yname = coefnames(f_s.lhs) 
+    Xnames = coefnames(f_s.rhs)
+
+    out = DataFrame()
+
+    out[!, yname] = vec(y)
+    for (j,name) in enumerate(Xnames)
+        out[!, name] = X[j]
+    end
+    return (out, reduce(hcat,Xnofe), vec(y))
+    
+end
+
+
+function ignore_fe(f::FormulaTerm)
+    rhs_terms = f.rhs isa Tuple ? collect(f.rhs) : collect(f.rhs.terms)
+
+    new_rhs = map(rhs_terms) do t
+        if t isa FunctionTerm{typeof(fe)}
+            term(Symbol(t.args[1]))
+        else
+            t
+        end
+    end
+
+    return FormulaTerm(f.lhs, Tuple(new_rhs))
+end
+
+
+function remove_fixedeffects(f::FormulaTerm)
+    rhs_terms = f.rhs isa Tuple ? collect(f.rhs) : collect(f.rhs.terms)
+
+    new_rhs = filter(rhs_terms) do t
+        !(t isa FunctionTerm{typeof(fe)})
+    end
+
+    return FormulaTerm(f.lhs, Tuple(new_rhs))
+end
 
 
 
 function fit_probit(
     data,
-    formula:: FormulaTerm,
+    formula,
     beta0,
     max_iter,
     tolerance #if the difference between the old beta and the new one is below the tolerance stop 
 )
+    #1. parse the formula and return a dataframe with only the needed columns, X::Matrix, y::Vector.
+    data, X, y = select_columns(data, formula)
 
-    
+    #initialize beta with the user inputed values
     beta = beta0
 
-    data.alpha_new .= 0
-
+    #initialize alpha and append it to the dataframe
+    data.alpha = zeros(size(X,1))
+    
+    iteration = 0
     for _ in 1:max_iter
 
-        y = Matrix(data[:,Cols("visit_dummy")])
-        X_i = data[:,Cols("age", "hhninc", "hhkids", "educ", "married")] #
-        X_i = Matrix(X_i) #
-        alpha = data.alpha_new
-        select!(data, Not(:alpha_new))
-
-        eta = X_i * beta + alpha 
-
+        #2. compute eta 
+        eta = X * beta + data.alpha 
+        
+        #compute the score and Hessian of the likelihood wrt eta
         v = log_likelihood_probit.(y,eta) 
 
         gi = getindex.(v, 1)
+        data.gi = gi
         hi = getindex.(v, 2)
+        data.hi = hi
 
-        z_i = eta .+ (gi./hi) 
-        id = Matrix(data[:,Cols("id")])
-        df = DataFrame( #FIXME funziona solo con 5 regressori, va generalizzato
-            z = vec(z_i),
-            y = vec(y),
-            h = vec(hi),
-            x1 = X_i[:,1],
-            x2 = X_i[:,2],
-            x3 = X_i[:,3],
-            x4 = X_i[:,4],
-            x5 = X_i[:,5],
-            id = vec(id)
-        )
+        data.z_i = eta .+ (gi./hi) 
 
         m = Regress.ols(
-            df,
-            @formula(z ~ x1 + x2 + x3 + x4 + x5 + fe(id));
-            weights = :h,
+            data,
+            formula;
+            weights = :hi,
             save = :fe,
         )
 
         beta_new = coef(m)                       # coefficienti delle x
         alpha_new = Regress.fe(m; keepkeys = true) # fixed effects stimati, con chiave c
-        hat_y = predict(m, df)       
-        data = dropmissing(rename!(leftjoin(data, unique(alpha_new, :id), on=:id), :fe_id => :alpha_new))
+        # hat_y = predict(m, data)       
+        # data = dropmissing(rename!(leftjoin(data, unique(alpha_new, :id), on=:id), :fe_id => :alpha_new))
+        data = leftjoin(data, unique(alpha_new, :id), on=:id)
 
+        select!(data, Not(:alpha))              # rimuove la vecchia alpha
+        rename!(data, :fe_id => :alpha)         # rinomina la nuova
+        dropmissing!(data)
+        _, X, y = select_columns(data, formula)
+        
+        
+        diagnostic = (norm(gi),maximum(abs.(gi)))
         if norm(beta - beta_new) < tolerance
-            beta = beta_new
-            break
+            return(beta_new,"stopped because difference between new and old β < $(tolerance) at iteration $(iteration)",data,diagnostic)
         end
-
+        iteration += 1
         beta = beta_new
     end
 
-    return beta
+    return (beta,iteration,data)
 end
+
+
 
 """
 An helper function for fit_probit, it computes the score and the Hessian
@@ -87,7 +138,7 @@ function log_likelihood_probit(y,eta)
         h_i = g_i^2 + eta * g_i
     else
         g_i = - exp(normlogpdf(eta)-normlogccdf(eta)) 
-        h_i = g_i^2 - eta*g_i
+        h_i = g_i^2 + eta*g_i
     end
     return (g_i, h_i)
 end
