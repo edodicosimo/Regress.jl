@@ -58,7 +58,9 @@ function remove_fixedeffects(f::FormulaTerm)
     return FormulaTerm(f.lhs, Tuple(new_rhs))
 end
 
-
+function replace_lhs(f::FormulaTerm, new_lhs::Symbol)
+    return Term(new_lhs) ~ f.rhs
+end
 
 function fit_probit(
     data,
@@ -91,10 +93,10 @@ function fit_probit(
         data.hi = hi
 
         data.z_i = eta .+ (gi./hi) 
-
+        
         m = Regress.ols(
             data,
-            formula;
+            replace_lhs(formula,:z_i);
             weights = :hi,
             save = :fe,
         )
