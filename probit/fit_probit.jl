@@ -62,6 +62,66 @@ function replace_lhs(f::FormulaTerm, new_lhs::Symbol)
     return Term(new_lhs) ~ f.rhs
 end
 
+"""
+    save_fe(f::FormulaTerm)
+From a formula return a vector of symbols that contains the fixed effect terms
+"""
+function save_fe(f::FormulaTerm)
+    rhs_terms = f.rhs isa Tuple ? collect(f.rhs) : collect(f.rhs.terms)
+    fes = filter(rhs_terms) do term
+        (term isa FunctionTerm{typeof(fe)})
+    end
+    fes = map(fes) do term
+        return term.args[1].sym
+    end
+    return fes
+end
+
+"""
+    fit_probit(data, formula, beta0, max_iter, tolerance)
+
+Estimate a probit model with high-dimensional fixed effects using an 
+Iteratively Reweighted Least Squares (IRLS.
+
+## Arguments
+- `data::DataFrame`  
+    Input dataset. 
+
+- `formula`  
+    A `StatsModels.jl` formula specifying the model.
+
+- `beta0::Vector`  
+    Initial guess for the coefficient vector β.
+
+- `max_iter::Int`  
+    Maximum number of iterations allowed.
+
+- `tolerance::Real`  
+    Convergence threshold based on the norm of successive β updates.
+
+## Returns 
+If convergence is reached:
+    (β̂, message, data, diagnostic)
+
+- `β̂::Vector`  
+    Estimated coefficients.
+
+- `message::String`  
+    Explanation of stopping condition.
+
+- `data::DataFrame`  
+    Final dataset including updated fixed effects and intermediate variables.
+
+- `diagnostic::Tuple`  
+    Tuple containing:
+        (‖g‖₂, max|g_i|)
+    useful to assess first-order optimality.
+
+## Notes 
+- The algorithm implements a probit MLE via IRLS rather than direct likelihood 
+  maximization.
+- Fixed effects are estimated at each iteration via `Regress.ols` 
+"""
 function fit_probit(
     data,
     formula,
@@ -79,6 +139,8 @@ function fit_probit(
     data.alpha = zeros(size(X,1))
     
     iteration = 0
+
+    fesymbols = save_fe(formula)
     for _ in 1:max_iter
 
         #2. compute eta 
@@ -101,11 +163,9 @@ function fit_probit(
             save = :fe,
         )
 
-        beta_new = coef(m)                       # coefficienti delle x
-        alpha_new = Regress.fe(m; keepkeys = true) # fixed effects stimati, con chiave c
-        # hat_y = predict(m, data)       
-        # data = dropmissing(rename!(leftjoin(data, unique(alpha_new, :id), on=:id), :fe_id => :alpha_new))
-        data = leftjoin(data, unique(alpha_new, :id), on=:id)
+        beta_new = coef(m)                      
+        alpha_new = Regress.fe(m; keepkeys = true) 
+        data = leftjoin(data, unique(alpha_new, fesymbols), on=fesymbols) 
 
         select!(data, Not(:alpha))              # rimuove la vecchia alpha
         rename!(data, :fe_id => :alpha)         # rinomina la nuova

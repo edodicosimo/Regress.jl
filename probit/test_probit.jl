@@ -26,4 +26,3 @@ hatBeta,i,df,d = fit_probit(
     0.000000001
 )
 
-
