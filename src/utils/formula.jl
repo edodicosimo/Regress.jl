@@ -318,6 +318,17 @@ end
 
 Create multiple lag columns from 1 to n. Used in formulas like
 `@formula(y ~ lags(x, 5))` to create a matrix with lag(x,1), ..., lag(x,5).
+
+Inside `@formula`, the second argument must be an integer literal —
+`@formula` rewrites free symbols as `Term` nodes representing data
+columns, so `lags(x, j)` cannot pick up `j` from the surrounding scope.
+To use a dynamic lag count (e.g. inside a loop), build the formula
+programmatically:
+
+    for j in 1:4
+        f = term(:y) ~ term(1) + lags(term(:x), j)
+        ols(df, f)
+    end
 """
 lags(t::T, n::Int) where {T <: AbstractTerm} = LagTerm{T}(t, n)
 
@@ -327,6 +338,9 @@ struct LagTerm{T <: AbstractTerm} <: AbstractTerm
 end
 
 StatsModels.terms(t::LagTerm) = StatsModels.terms(t.term)
+function StatsModels.terms(t::FunctionTerm{typeof(lags)})
+    length(t.args) >= 1 ? StatsModels.terms(t.args[1]) : AbstractTerm[]
+end
 StatsModels.needs_schema(::LagTerm) = false
 
 function _parse_lags_args(t::FunctionTerm)
@@ -334,9 +348,15 @@ function _parse_lags_args(t::FunctionTerm)
         return (first(t.args), 1)
     elseif length(t.args) == 2
         term, param_arg = t.args
-        (param_arg isa ConstantTerm) ||
-            throw(ArgumentError("lags parameter must be a number (got $param_arg)"))
-        return (term, param_arg.n)
+        if param_arg isa ConstantTerm
+            return (term, param_arg.n)
+        else
+            throw(ArgumentError(
+                "lags() inside @formula requires an integer literal as the " *
+                "second argument; got `$(t.exorig)`. To use a dynamic lag " *
+                "count, build the formula programmatically, e.g. " *
+                "`term(:y) ~ term(1) + lags(term(:x), j)`."))
+        end
     else
         throw(ArgumentError("lags() requires 1 or 2 arguments"))
     end
