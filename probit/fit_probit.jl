@@ -1,10 +1,12 @@
 using Distributions
 using DataFrames
-using Regress
+import Regress
 using Regress: fe
 using StatsModels
 using StatsFuns
 using LinearAlgebra
+include("BinaryModel.jl")
+
 
 
 function select_columns(df::DataFrame, formula::FormulaTerm)
@@ -77,6 +79,14 @@ function save_fe(f::FormulaTerm)
     return fes
 end
 
+function get_coefficient_names_nofe(formula::FormulaTerm, data::DataFrame)
+    formula = remove_fixedeffects(formula)
+    schema = StatsModels.schema(formula, data)
+    f_s = apply_schema(formula,schema)
+    response_name, coef_names = coefnames(f_s.lhs), coefnames(f_s.rhs)
+    coef_names_str = String[string(name) for name = coef_names] 
+end
+
 """
     fit_probit(data, formula, beta0, max_iter, tolerance)
 
@@ -129,8 +139,12 @@ function fit_probit(
     max_iter,
     tolerance #if the difference between the old beta and the new one is below the tolerance stop 
 )
-    #1. parse the formula and return a dataframe with only the needed columns, X::Matrix, y::Vector.
+    #parse the formula and return a dataframe with only the needed columns, X::Matrix, y::Vector.
     data, X, y = select_columns(data, formula)
+
+    # store coefficient names for model sumamry
+    coef_names_str = get_coefficient_names_nofe(formula, data)
+
 
     #initialize beta with the user inputed values
     beta = beta0
@@ -138,8 +152,8 @@ function fit_probit(
     #initialize alpha and append it to the dataframe
     data.alpha = zeros(size(X,1))
     
-    iteration = 0
-
+    hatY = Vector{Float64}()
+    tss = sum((y .- mean(y)).^2)
     fesymbols = save_fe(formula)
     for _ in 1:max_iter
 
@@ -163,7 +177,8 @@ function fit_probit(
             save = :fe,
         )
 
-        beta_new = coef(m)                      
+        beta_new = Regress.coef(m)                      
+        hatY = Regress.predict(m,data)
         alpha_new = Regress.fe(m; keepkeys = true) 
         data = leftjoin(data, unique(alpha_new, fesymbols), on=fesymbols) 
 
@@ -173,15 +188,39 @@ function fit_probit(
         _, X, y = select_columns(data, formula)
         
         
-        diagnostic = (norm(gi),maximum(abs.(gi)))
+        
         if norm(beta - beta_new) < tolerance
-            return(beta_new,"stopped because difference between new and old β < $(tolerance) at iteration $(iteration)",data,diagnostic)
+            break
         end
-        iteration += 1
+        
         beta = beta_new
     end
+    rr = BinaryResponse{Float64}(
+        y,
+        hatY, #FIXME non so se ci va yhat qua, cosa sono i valori fittati nel probit?
+        Vector{Float64}(),
+        Vector{Float64}(),
+        :simboloToFix #FIXME
 
-    return (beta,iteration,data)
+    )
+    pp = BinaryPredictorQR{Float64}(
+        X,
+        Matrix{Float64}(undef,0,0),
+        beta
+    )
+    estimator = BinaryEstimator{Float64}(
+        rr,
+        pp,
+        formula,
+        size(data,1),
+        0,
+        0.0,
+        tss,
+        true,
+        0,
+        coef_names_str
+    )
+    return estimator
 end
 
 
@@ -204,5 +243,4 @@ function log_likelihood_probit(y,eta)
     end
     return (g_i, h_i)
 end
-
 
