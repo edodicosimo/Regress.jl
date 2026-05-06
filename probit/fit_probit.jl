@@ -8,7 +8,10 @@ using LinearAlgebra
 include("BinaryModel.jl")
 
 
-
+"""
+    select_columns(df::DataFrame, formula::FormulaTerm) -> df::DataFrame, X::Matrix, y::Vector
+Select from a dataframe only the columns specified by the formula
+"""
 function select_columns(df::DataFrame, formula::FormulaTerm)
     formulanofe = remove_fixedeffects(formula)
     formula = ignore_fe(formula)
@@ -65,7 +68,7 @@ function replace_lhs(f::FormulaTerm, new_lhs::Symbol)
 end
 
 """
-    save_fe(f::FormulaTerm)
+    save_fe(f::FormulaTerm) -> Vector{Symbol}
 From a formula return a vector of symbols that contains the fixed effect terms
 """
 function save_fe(f::FormulaTerm)
@@ -87,57 +90,32 @@ function get_coefficient_names_nofe(formula::FormulaTerm, data::DataFrame)
     coef_names_str = String[string(name) for name = coef_names] 
 end
 
+function drop_term(f::FormulaTerm, sym::String)
+    sym = Symbol(sym)
+    rhs_terms = filter(t -> t != term(sym), collect(f.rhs))
+    return f.lhs ~ sum(rhs_terms)
+end
 """
-    fit_probit(data, formula, beta0, max_iter, tolerance)
+    fit_probit(data, formula, beta0, max_iter, tolerance) -> BinaryEstimator
 
-Estimate a probit model with high-dimensional fixed effects using an 
-Iteratively Reweighted Least Squares (IRLS.
+Estimate a probit model with fixed effects using Iteratively Reweighted Least Squares (IRLS).
 
-## Arguments
-- `data::DataFrame`  
-    Input dataset. 
+# Arguments
+- `data::DataFrame`: Input dataset. 
+- `formula::FormulaTerm`: A `StatsModels.jl` formula created using `@formula(y ~ x1 + x2 + fe(group))`.
+- `beta0::Vector` : Initial guess for the coefficient vector β.
+- `max_iter::Int`  : Maximum number of iterations allowed.
+- `tolerance::Real` : Convergence threshold based on the norm of successive β updates.
 
-- `formula`  
-    A `StatsModels.jl` formula specifying the model.
+# Returns 
 
-- `beta0::Vector`  
-    Initial guess for the coefficient vector β.
-
-- `max_iter::Int`  
-    Maximum number of iterations allowed.
-
-- `tolerance::Real`  
-    Convergence threshold based on the norm of successive β updates.
-
-## Returns 
-If convergence is reached:
-    (β̂, message, data, diagnostic)
-
-- `β̂::Vector`  
-    Estimated coefficients.
-
-- `message::String`  
-    Explanation of stopping condition.
-
-- `data::DataFrame`  
-    Final dataset including updated fixed effects and intermediate variables.
-
-- `diagnostic::Tuple`  
-    Tuple containing:
-        (‖g‖₂, max|g_i|)
-    useful to assess first-order optimality.
-
-## Notes 
-- The algorithm implements a probit MLE via IRLS rather than direct likelihood 
-  maximization.
-- Fixed effects are estimated at each iteration via `Regress.ols` 
 """
 function fit_probit(
-    data,
-    formula,
-    beta0,
-    max_iter,
-    tolerance #if the difference between the old beta and the new one is below the tolerance stop 
+    @nospecialize(data),
+    formula::FormulaTerm,
+    beta0::Vector,
+    max_iter::Integer,
+    tolerance::Real #if the difference between the old beta and the new one is below the tolerance stop 
 )
     #parse the formula and return a dataframe with only the needed columns, X::Matrix, y::Vector.
     data, X, y = select_columns(data, formula)
@@ -155,19 +133,25 @@ function fit_probit(
     hatY = Vector{Float64}()
     tss = sum((y .- mean(y)).^2)
     fesymbols = save_fe(formula)
+    
+    ###########################
+    ##### ESTIMATION LOOP #####
+    ###########################
+
     for _ in 1:max_iter
 
-        #2. compute eta 
+        #compute eta 
         eta = X * beta + data.alpha 
         
         #compute the score and Hessian of the likelihood wrt eta
         v = log_likelihood_probit.(y,eta) 
-
+        
+        # append the score and hessian to the dataframe
         gi = getindex.(v, 1)
         data.gi = gi
         hi = getindex.(v, 2)
         data.hi = hi
-
+        
         data.z_i = eta .+ (gi./hi) 
         
         m = Regress.ols(
@@ -179,14 +163,37 @@ function fit_probit(
 
         beta_new = Regress.coef(m)                      
         hatY = Regress.predict(m,data)
-        alpha_new = Regress.fe(m; keepkeys = true) 
-        data = leftjoin(data, unique(alpha_new, fesymbols), on=fesymbols) 
+        alpha_new = Regress.fe(m; keepkeys = true) #dataframe che per ogni variabile fe ha due colonne: nome e fe_{nome} 
 
+        fe_cols = Symbol.("fe_" .* string.(fesymbols))
+
+        alpha_new = select(alpha_new, vcat(fesymbols, fe_cols))
+        alpha_new = unique(alpha_new, fesymbols)
+
+        old_cols = setdiff(
+            intersect(propertynames(data), propertynames(alpha_new)),
+            fesymbols
+        )
+
+        select!(data, Not(old_cols))
+
+        data = leftjoin(data, alpha_new, on = fesymbols)
         select!(data, Not(:alpha))              # rimuove la vecchia alpha
         rename!(data, :fe_id => :alpha)         # rinomina la nuova
         dropmissing!(data)
+        collinear_cols = coefnames(m)[.!m.basis_coef]
+        if length(collinear_cols) > 0
+            select!(data,Not(collinear_cols))
+            keep = .!in.(coefnames(m), Ref(collinear_cols))
+            beta = beta[keep]
+            beta_new = coef(m)[keep]
+            for term in collinear_cols
+                formula = drop_term(formula,term)
+            end
+            coef_names_str = get_coefficient_names_nofe(formula, data)
+        end
+
         _, X, y = select_columns(data, formula)
-        
         
         
         if norm(beta - beta_new) < tolerance
