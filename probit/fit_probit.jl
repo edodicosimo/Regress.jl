@@ -37,7 +37,11 @@ function select_columns(df::DataFrame, formula::FormulaTerm)
     
 end
 
-
+"""
+    ignore_fe(f::FormulaTerm) -> FormulaTerm
+given a formula return the same formula but with the fe terms treated as non-fe
+es: ignore_re(@formula(y ~ x + fe(z))) -> @formula(y ~ x + z) 
+"""
 function ignore_fe(f::FormulaTerm)
     rhs_terms = f.rhs isa Tuple ? collect(f.rhs) : collect(f.rhs.terms)
 
@@ -52,7 +56,10 @@ function ignore_fe(f::FormulaTerm)
     return FormulaTerm(f.lhs, Tuple(new_rhs))
 end
 
-
+"""
+    remove_fe(f::FormulaTerm) -> FormulaTerm
+given a formula removes the term that are as such fe(term)
+"""
 function remove_fixedeffects(f::FormulaTerm)
     rhs_terms = f.rhs isa Tuple ? collect(f.rhs) : collect(f.rhs.terms)
 
@@ -117,12 +124,15 @@ function fit_probit(
     max_iter::Integer,
     tolerance::Real #if the difference between the old beta and the new one is below the tolerance stop 
 )
+    ###############################################
+    ###### FORMULA PARSING AND DATA CLEANING ######
+    ###############################################
+
     #parse the formula and return a dataframe with only the needed columns, X::Matrix, y::Vector.
     data, X, y = select_columns(data, formula)
 
     # store coefficient names for model sumamry
     coef_names_str = get_coefficient_names_nofe(formula, data)
-
 
     #initialize beta with the user inputed values
     beta = beta0
@@ -130,17 +140,22 @@ function fit_probit(
     #initialize alpha and append it to the dataframe
     data.alpha = zeros(size(X,1))
     
+    # vector to store fitted values, now empty
     hatY = Vector{Float64}()
+
+    # total sum of squares
     tss = sum((y .- mean(y)).^2)
+
+    # a vector of symbols that contains the fixed effect terms in the formula
     fesymbols = save_fe(formula)
-    
-    ###########################
-    ##### ESTIMATION LOOP #####
-    ###########################
+
+    ###############################################
+    ############ ESTIMATION LOOP ##################
+    ###############################################
 
     for _ in 1:max_iter
 
-        #compute eta 
+        # eta is the working variable wrt which we compute the ml stats
         eta = X * beta + data.alpha 
         
         #compute the score and Hessian of the likelihood wrt eta
@@ -151,9 +166,11 @@ function fit_probit(
         data.gi = gi
         hi = getindex.(v, 2)
         data.hi = hi
-        
+       
+        # compute working response and append to the df 
         data.z_i = eta .+ (gi./hi) 
         
+        # run WLS fixed effects regression zi ~ rhs
         m = Regress.ols(
             data,
             replace_lhs(formula,:z_i);
@@ -161,22 +178,23 @@ function fit_probit(
             save = :fe,
         )
 
-        beta_new = Regress.coef(m)                      
-        hatY = Regress.predict(m,data)
-        alpha_new = Regress.fe(m; keepkeys = true) #dataframe che per ogni variabile fe ha due colonne: nome e fe_{nome} 
+        # the estimated coefficient
+        beta_new = Regress.coef(m) 
+        
+        # these are the estimated fixed effects
+        #dataframe che per ogni dimensione fe ha due colonne: nome e fe_{nome} 
+        alpha_new = Regress.fe(m; keepkeys = true) 
 
-        fe_cols = Symbol.("fe_" .* string.(fesymbols))
-
-        alpha_new = select(alpha_new, vcat(fesymbols, fe_cols))
-        alpha_new = unique(alpha_new, fesymbols)
-
+        #names of the fe columns already in the data df
         old_cols = setdiff(
             intersect(propertynames(data), propertynames(alpha_new)),
             fesymbols
         )
 
+        #remove old fe columns
         select!(data, Not(old_cols))
 
+        #join fe into the data df
         data = leftjoin(data, alpha_new, on = fesymbols)
         select!(data, Not(:alpha))              # rimuove la vecchia alpha
         rename!(data, :fe_id => :alpha)         # rinomina la nuova
@@ -197,6 +215,8 @@ function fit_probit(
         
         
         if norm(beta - beta_new) < tolerance
+            # store the fitted values 
+            hatY = Regress.predict(m,data)
             break
         end
         
