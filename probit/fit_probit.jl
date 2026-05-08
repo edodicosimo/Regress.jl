@@ -147,25 +147,27 @@ function fit_probit(
     # total sum of squares
     tss = sum((y .- mean(y)).^2)
 
-    # a vector of symbols that contains the fixed effect terms in the formula
+    # formula parsing
     formula, formula_fes = Regress.parse_fe(formula)
     fes, feids, fekeys = Regress.parse_fixedeffect(data, formula_fes)
-    PO = []
+
+    #Initialize variables
+    eta = X * beta
+    v = log_likelihood_probit.(y,eta)
+    total_log_likelihood = sum(getindex.(v,3)) 
+    deviance = -2 * total_log_likelihood
 
     ###############################################
     ############ ESTIMATION LOOP ##################
     ###############################################
-
+    i = 0
     for _ in 1:max_iter
-        alpha_sum = alpha isa AbstractVector ? alpha : vec(sum(alpha, dims = 2))
-        # Compute eta = X * beta + alpha(t) using current iteration alpha but original X
-        eta = X * beta .+ alpha_sum 
-        
+        i += 1
+
         #compute the score (gi) and Hessian (hi) of the likelihood wrt eta
-        v = log_likelihood_probit.(y,eta) 
         gi = getindex.(v, 1)
         hi = getindex.(v, 2)
-       
+        
         # compute working response and append to the df 
         zi = eta .+ (gi./hi) 
         
@@ -202,26 +204,47 @@ function fit_probit(
             )
         )
 
-    
         PO = [feM, iterations,
         converged,
         tss_partial,
         oldz,
         oldX]
         newfes, b, c = Regress.solve_coefficients!(
-            y - oldX * betanew,
+            oldz - oldX * betanew,
             feM;
             tol = 1e-6,
             maxiter = 1000
         )
+
         X = oldX
-        alpha = stack(newfes)
         
-        if norm(beta-betanew) < tolerance
+        alpha = stack(newfes)
+
+        # Compute eta(t) = X * beta + alpha(t) using current iteration alpha but original X
+        alpha_sum = alpha isa AbstractVector ? alpha : vec(sum(alpha, dims = 2))
+        eta = X * betanew .+ alpha_sum
+
+        v = log_likelihood_probit.(y,eta)
+        total_log_likelihood = sum(getindex.(v,3))
+        deviance_new = -2 * total_log_likelihood
+
+        # step halving
+        steps = 0
+        while deviance < deviance_new && steps < 26
+            betanew = (beta .+ betanew) ./2
+            eta = X * betanew .+ alpha_sum
+            v = log_likelihood_probit.(y,eta)
+            total_log_likelihood = sum(getindex.(v,3))
+            deviance_new = -2 * total_log_likelihood
+            steps += 1
+        end
+        
+        if norm(deviance_new - deviance) / (0.1 + norm(deviance_new))  < tolerance
             beta = betanew
             break
         end
-            beta = betanew
+        deviance = deviance_new
+        beta = betanew
         
     end
  rr = BinaryResponse{Float64}(
@@ -266,10 +289,13 @@ function log_likelihood_probit(y,eta)
     if y == 1
         g_i = exp(normlogpdf(eta)-normlogcdf(eta))
         h_i = g_i^2 + eta * g_i
+        di = normlogcdf(eta)
     else
         g_i = - exp(normlogpdf(eta)-normlogccdf(eta)) 
         h_i = g_i^2 + eta*g_i
+        di = normlogccdf(eta)
     end
-    return (g_i, h_i)
+    return (g_i, h_i,di)
 end
+
 
