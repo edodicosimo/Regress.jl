@@ -216,6 +216,7 @@ function fit_probit(
         )
         X = oldX
         alpha = stack(newfes)
+        
         if norm(beta-betanew) < tolerance
             beta = betanew
             break

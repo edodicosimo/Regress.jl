@@ -18,8 +18,7 @@ rename!(rwm_data, [
 rwm_data[!, :visit_dummy] = ifelse.(rwm_data.docvis .> 0, 1, 0)
            
 
-
-@time beta = fit_probit(
+@time m = fit_probit(
     rwm_data,
     @formula(visit_dummy ~ age + hhninc + hhkids + educ + married + fe(id)),
     [0,0,0,0,0],
@@ -29,4 +28,3 @@ rwm_data[!, :visit_dummy] = ifelse.(rwm_data.docvis .> 0, 1, 0)
 
 
 
-stack(newfes)
