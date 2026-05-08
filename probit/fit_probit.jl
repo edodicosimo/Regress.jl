@@ -5,6 +5,7 @@ using Regress: fe
 using StatsModels
 using StatsFuns
 using LinearAlgebra
+using Base.Threads
 include("BinaryModel.jl")
 
 
@@ -83,10 +84,10 @@ function save_fe(f::FormulaTerm)
     fes = filter(rhs_terms) do term
         (term isa FunctionTerm{typeof(fe)})
     end
-    fes = map(fes) do term
+    fesymbol = map(fes) do term
         return term.args[1].sym
     end
-    return fes
+    return fes,fesymbol
 end
 
 function get_coefficient_names_nofe(formula::FormulaTerm, data::DataFrame)
@@ -131,13 +132,13 @@ function fit_probit(
     #parse the formula and return a dataframe with only the needed columns, X::Matrix, y::Vector.
     data, X, y = select_columns(data, formula)
 
-    # store coefficient names for model sumamry
+    # store coefficient names for model summary, ignroes fe variables
     coef_names_str = get_coefficient_names_nofe(formula, data)
 
     #initialize beta with the user inputed values
     beta = beta0
 
-    #initialize alpha and append it to the dataframe
+    #initialize alpha to all 0 and append it to the dataframe
     data.alpha = zeros(size(X,1))
     
     # vector to store fitted values, now empty
@@ -147,7 +148,9 @@ function fit_probit(
     tss = sum((y .- mean(y)).^2)
 
     # a vector of symbols that contains the fixed effect terms in the formula
-    fesymbols = save_fe(formula)
+    formula, formula_fes = Regress.parse_fe(formula)
+    fes, feids, fekeys = Regress.parse_fixedeffect(data, formula_fes)
+    PO = []
 
     ###############################################
     ############ ESTIMATION LOOP ##################
@@ -155,99 +158,49 @@ function fit_probit(
 
     for _ in 1:max_iter
 
-        # eta is the working variable wrt which we compute the ml stats
+        # Compute eta = X * beta + alpha(t) using current iteration alpha but original X
         eta = X * beta + data.alpha 
         
-        #compute the score and Hessian of the likelihood wrt eta
+        #compute the score (gi) and Hessian (hi) of the likelihood wrt eta
         v = log_likelihood_probit.(y,eta) 
-        
-        # append the score and hessian to the dataframe
         gi = getindex.(v, 1)
-        data.gi = gi
         hi = getindex.(v, 2)
-        data.hi = hi
        
         # compute working response and append to the df 
-        data.z_i = eta .+ (gi./hi) 
+        zi = eta .+ (gi./hi) 
         
-        # run WLS fixed effects regression zi ~ rhs
-        m = Regress.ols(
-            data,
-            replace_lhs(formula,:z_i);
-            weights = :hi,
-            save = :fe,
+        # create a vector of vectors with zi and then all the columns of X, to then pass it to partialout
+        # this will be modified in place
+        cols = Vector{AbstractVector{Float64}}(collect(eachcol(X)))
+        pushfirst!(cols, zi)
+
+        feM, iterations,
+        converged,
+        tss_partial,
+        oldy,
+        oldX= Regress.partial_out_fixed_effects!(
+            cols,
+            coef_names_str,
+            fes,
+            Weights(hi),
+            :cpu, # TODO make this an argument,
+            Threads.nthreads(),
+            1e-6,
+            10000,
+            true,
+            true, #we need to always save fixed effects,
+            true, 
+            true, 
+            Float64
         )
-
-        # the estimated coefficient
-        beta_new = Regress.coef(m) 
-        
-        # these are the estimated fixed effects
-        #dataframe che per ogni dimensione fe ha due colonne: nome e fe_{nome} 
-        alpha_new = Regress.fe(m; keepkeys = true) 
-
-        #names of the fe columns already in the data df
-        old_cols = setdiff(
-            intersect(propertynames(data), propertynames(alpha_new)),
-            fesymbols
-        )
-
-        #remove old fe columns
-        select!(data, Not(old_cols))
-
-        #join fe into the data df
-        data = leftjoin(data, alpha_new, on = fesymbols)
-        select!(data, Not(:alpha))              # rimuove la vecchia alpha
-        rename!(data, :fe_id => :alpha)         # rinomina la nuova
-        dropmissing!(data)
-        collinear_cols = coefnames(m)[.!m.basis_coef]
-        if length(collinear_cols) > 0
-            select!(data,Not(collinear_cols))
-            keep = .!in.(coefnames(m), Ref(collinear_cols))
-            beta = beta[keep]
-            beta_new = coef(m)[keep]
-            for term in collinear_cols
-                formula = drop_term(formula,term)
-            end
-            coef_names_str = get_coefficient_names_nofe(formula, data)
-        end
-
-        _, X, y = select_columns(data, formula)
-        
-        
-        if norm(beta - beta_new) < tolerance
-            # store the fitted values 
-            hatY = Regress.predict(m,data)
-            break
-        end
-        
-        beta = beta_new
+    
+        PO = [feM, iterations,
+        converged,
+        tss_partial,
+        oldy,
+        oldX]
     end
-    rr = BinaryResponse{Float64}(
-        y,
-        hatY, #FIXME non so se ci va yhat qua, cosa sono i valori fittati nel probit?
-        Vector{Float64}(),
-        Vector{Float64}(),
-        :simboloToFix #FIXME
-
-    )
-    pp = BinaryPredictorQR{Float64}(
-        X,
-        Matrix{Float64}(undef,0,0),
-        beta
-    )
-    estimator = BinaryEstimator{Float64}(
-        rr,
-        pp,
-        formula,
-        size(data,1),
-        0,
-        0.0,
-        tss,
-        true,
-        0,
-        coef_names_str
-    )
-    return estimator
+return PO
 end
 
 
