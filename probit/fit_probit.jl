@@ -139,7 +139,7 @@ function fit_probit(
     beta = beta0
 
     #initialize alpha to all 0 and append it to the dataframe
-    data.alpha = zeros(size(X,1))
+    alpha = zeros(size(X,1))
     
     # vector to store fitted values, now empty
     hatY = Vector{Float64}()
@@ -157,9 +157,9 @@ function fit_probit(
     ###############################################
 
     for _ in 1:max_iter
-
+        alpha_sum = alpha isa AbstractVector ? alpha : vec(sum(alpha, dims = 2))
         # Compute eta = X * beta + alpha(t) using current iteration alpha but original X
-        eta = X * beta + data.alpha 
+        eta = X * beta .+ alpha_sum 
         
         #compute the score (gi) and Hessian (hi) of the likelihood wrt eta
         v = log_likelihood_probit.(y,eta) 
@@ -177,7 +177,7 @@ function fit_probit(
         feM, iterations,
         converged,
         tss_partial,
-        oldy,
+        oldz,
         oldX= Regress.partial_out_fixed_effects!(
             cols,
             coef_names_str,
@@ -192,15 +192,63 @@ function fit_probit(
             true, 
             true, 
             Float64
+        ) # this modifies X and z in place
+
+        betanew = Regress.coef(
+            Regress.ols(
+                X,
+                zi,
+                weights= hi
+            )
         )
+
     
         PO = [feM, iterations,
         converged,
         tss_partial,
-        oldy,
+        oldz,
         oldX]
+        newfes, b, c = Regress.solve_coefficients!(
+            y - oldX * betanew,
+            feM;
+            tol = 1e-6,
+            maxiter = 1000
+        )
+        X = oldX
+        alpha = stack(newfes)
+        if norm(beta-betanew) < tolerance
+            beta = betanew
+            break
+        end
+            beta = betanew
+        
     end
-return PO
+ rr = BinaryResponse{Float64}(
+        y,
+        hatY, #FIXME non so se ci va yhat qua, cosa sono i valori fittati nel probit?
+        Vector{Float64}(),
+        Vector{Float64}(),
+        :simboloToFix #FIXME
+
+    )
+    pp = BinaryPredictorQR{Float64}(
+        X,
+        Matrix{Float64}(undef,0,0),
+        beta
+    )
+    estimator = BinaryEstimator{Float64}(
+        rr,
+        pp,
+        formula,
+        size(data,1),
+        0,
+        0.0,
+        tss,
+        true,
+        0,
+        coef_names_str
+    )
+    return estimator
 end
 
 

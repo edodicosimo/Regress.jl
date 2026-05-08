@@ -19,12 +19,14 @@ rwm_data[!, :visit_dummy] = ifelse.(rwm_data.docvis .> 0, 1, 0)
            
 
 
-po = fit_probit(
+@time beta = fit_probit(
     rwm_data,
-    @formula(visit_dummy ~ age + hhninc + hhkids + educ + married + fe(year)+ fe(id)),
+    @formula(visit_dummy ~ age + hhninc + hhkids + educ + married + fe(id)),
     [0,0,0,0,0],
-    1000,
-    0.000000001
+    10000,
+    1e-6
     )
 
-po
+
+
+stack(newfes)
