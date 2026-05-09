@@ -197,13 +197,13 @@ function fit_probit(
             Float64
         ) # this modifies X and z in place
 
-        betanew = Regress.coef(
-            Regress.ols(
+        wls = Regress.ols(
                 X,
                 zi,
                 weights= hi
             )
-        )
+            
+        betanew = Regress.coef(wls)
 
         PO = [feM, iterations,
         converged,
