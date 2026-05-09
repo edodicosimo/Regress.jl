@@ -11,7 +11,6 @@ include("BinaryModel.jl")
 #######################################
 ### HELPER FUNCTION TO CLEAN DATA
 #######################################
-
 """
     select_columns(df::DataFrame, formula::FormulaTerm) -> data, X, y
 
@@ -19,27 +18,27 @@ Return a reduced data frame, model matrix, and response vector using only the
 variables referenced by `formula`.
 """
 function select_columns(df::DataFrame, formula::FormulaTerm)
-    formulanofe = remove_fixedeffects(formula)
+    formula_without_fe = remove_fixedeffects(formula)
     formula = ignore_fe(formula)
     
     y = modelcols(formula.lhs,df)
     X = modelcols(formula.rhs,df)
     
-    Xnofe = modelcols(formulanofe.rhs,df)
+    X_without_fe = modelcols(formula_without_fe.rhs,df)
 
     schema = StatsModels.schema(formula, df)
-    f_s = apply_schema(formula,schema)
+    formula_schema = apply_schema(formula,schema)
 
-    yname = coefnames(f_s.lhs) 
-    Xnames = coefnames(f_s.rhs)
+    response_name = coefnames(formula_schema.lhs) 
+    Xnames = coefnames(formula_schema.rhs)
 
     out = DataFrame()
 
-    out[!, yname] = vec(y)
+    out[!, response_name] = vec(y)
     for (j,name) in enumerate(Xnames)
         out[!, name] = X[j]
     end
-    return (out, reduce(hcat,Xnofe), vec(y))
+    return (out, reduce(hcat,X_without_fe), vec(y))
     
 end
 
@@ -87,8 +86,8 @@ terms from `formula`.
 function get_coefficient_names_nofe(formula::FormulaTerm, data::DataFrame)
     formula = remove_fixedeffects(formula)
     schema = StatsModels.schema(formula, data)
-    f_s = apply_schema(formula,schema)
-    response_name, coef_names = coefnames(f_s.lhs), coefnames(f_s.rhs)
+    formula_schema = apply_schema(formula,schema)
+    response_name, coef_names = coefnames(formula_schema.lhs), coefnames(formula_schema.rhs)
     coef_names_str = String[string(name) for name = coef_names] 
     return (Symbol(response_name),coef_names_str)
 end
@@ -239,7 +238,7 @@ function fit_probit(
     alpha = zeros(size(X,1))
     
     # vector to store fitted values, now empty
-    hatY = Vector{Float64}()
+    fitted_probabilities = Vector{Float64}()
 
     # total sum of squares
     tss = sum((y .- mean(y)).^2)
@@ -347,7 +346,7 @@ function fit_probit(
     ## Summary statistics
     ################################
 
-    hatY = normcdf.(eta)
+    fitted_probabilities = normcdf.(eta)
 
 
 
@@ -357,7 +356,7 @@ function fit_probit(
 
  rr = BinaryResponse{Float64}(
         y,
-        hatY, #FIXME non so se ci va yhat qua, cosa sono i valori fittati nel probit?
+        fitted_probabilities, #FIXME non so se ci va yhat qua, cosa sono i valori fittati nel probit?
         Vector{Float64}(),
         Vector{Float64}(),
         response_name #FIXME
