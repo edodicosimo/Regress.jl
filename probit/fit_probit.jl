@@ -96,6 +96,7 @@ function get_coefficient_names_nofe(formula::FormulaTerm, data::DataFrame)
     f_s = apply_schema(formula,schema)
     response_name, coef_names = coefnames(f_s.lhs), coefnames(f_s.rhs)
     coef_names_str = String[string(name) for name = coef_names] 
+    return (Symbol(response_name),coef_names_str)
 end
 
 function drop_term(f::FormulaTerm, sym::String)
@@ -133,7 +134,7 @@ function fit_probit(
     data, X, y = select_columns(data, formula)
 
     # store coefficient names for model summary, ignroes fe variables
-    coef_names_str = get_coefficient_names_nofe(formula, data)
+    response_name, coef_names_str = get_coefficient_names_nofe(formula, data)
 
     #initialize beta with the user inputed values
     beta = beta0
@@ -256,8 +257,6 @@ function fit_probit(
 
 
 
-
-
     ################################
     ## Construct Return Objects
     ################################
@@ -267,7 +266,7 @@ function fit_probit(
         hatY, #FIXME non so se ci va yhat qua, cosa sono i valori fittati nel probit?
         Vector{Float64}(),
         Vector{Float64}(),
-        :simboloToFix #FIXME
+        response_name #FIXME
 
     )
     pp = BinaryPredictorQR{Float64}(

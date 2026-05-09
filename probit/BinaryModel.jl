@@ -37,8 +37,10 @@ end
 
 has_iv(::BinaryEstimator) = false
 has_fe(m::BinaryEstimator) = Regress.has_fe(m.formula)
+
 StatsAPI.islinear(::BinaryEstimator) = false
 StatsAPI.coefnames(m::BinaryEstimator) = m.coefnames #return coefficient names NO FE variables
+StatsAPI.responsename(m::BinaryEstimator) = m.rr.response_name
 
 function StatsAPI.coef(m::BinaryEstimator)
     m.pp.beta
