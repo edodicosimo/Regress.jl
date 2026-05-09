@@ -75,20 +75,7 @@ function replace_lhs(f::FormulaTerm, new_lhs::Symbol)
     return Term(new_lhs) ~ f.rhs
 end
 
-"""
-    save_fe(f::FormulaTerm) -> Vector{Symbol}
-From a formula return a vector of symbols that contains the fixed effect terms
-"""
-function save_fe(f::FormulaTerm)
-    rhs_terms = f.rhs isa Tuple ? collect(f.rhs) : collect(f.rhs.terms)
-    fes = filter(rhs_terms) do term
-        (term isa FunctionTerm{typeof(fe)})
-    end
-    fesymbol = map(fes) do term
-        return term.args[1].sym
-    end
-    return fes,fesymbol
-end
+
 
 function get_coefficient_names_nofe(formula::FormulaTerm, data::DataFrame)
     formula = remove_fixedeffects(formula)
@@ -99,11 +86,6 @@ function get_coefficient_names_nofe(formula::FormulaTerm, data::DataFrame)
     return (Symbol(response_name),coef_names_str)
 end
 
-function drop_term(f::FormulaTerm, sym::String)
-    sym = Symbol(sym)
-    rhs_terms = filter(t -> t != term(sym), collect(f.rhs))
-    return f.lhs ~ sum(rhs_terms)
-end
 
 # custom ols solver, modified from Regress ols() since we don't need inference
 ############################################################
