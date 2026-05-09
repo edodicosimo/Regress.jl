@@ -247,6 +247,21 @@ function fit_probit(
         beta = betanew
         
     end
+
+    ################################
+    ## Summary statistics
+    ################################
+
+    hatY = normcdf.(eta)
+
+
+
+
+
+    ################################
+    ## Construct Return Objects
+    ################################
+
  rr = BinaryResponse{Float64}(
         y,
         hatY, #FIXME non so se ci va yhat qua, cosa sono i valori fittati nel probit?
