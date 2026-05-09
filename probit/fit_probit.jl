@@ -8,10 +8,15 @@ using LinearAlgebra
 using Base.Threads
 include("BinaryModel.jl")
 
+#######################################
+### HELPER FUNCTION TO CLEAN DATA
+#######################################
 
 """
-    select_columns(df::DataFrame, formula::FormulaTerm) -> df::DataFrame, X::Matrix, y::Vector
-Select from a dataframe only the columns specified by the formula
+    select_columns(df::DataFrame, formula::FormulaTerm) -> data, X, y
+
+Return a reduced data frame, model matrix, and response vector using only the
+variables referenced by `formula`.
 """
 function select_columns(df::DataFrame, formula::FormulaTerm)
     formulanofe = remove_fixedeffects(formula)
@@ -40,8 +45,8 @@ end
 
 """
     ignore_fe(f::FormulaTerm) -> FormulaTerm
-given a formula return the same formula but with the fe terms treated as non-fe
-es: ignore_re(@formula(y ~ x + fe(z))) -> @formula(y ~ x + z) 
+
+Return a formula where each `fe(x)` term is converted to the ordinary term `x`.
 """
 function ignore_fe(f::FormulaTerm)
     rhs_terms = f.rhs isa Tuple ? collect(f.rhs) : collect(f.rhs.terms)
@@ -58,8 +63,9 @@ function ignore_fe(f::FormulaTerm)
 end
 
 """
-    remove_fe(f::FormulaTerm) -> FormulaTerm
-given a formula removes the term that are as such fe(term)
+    remove_fixedeffects(f::FormulaTerm) -> FormulaTerm
+
+Return a formula with all `fe(...)` terms removed from the right-hand side.
 """
 function remove_fixedeffects(f::FormulaTerm)
     rhs_terms = f.rhs isa Tuple ? collect(f.rhs) : collect(f.rhs.terms)
@@ -71,12 +77,13 @@ function remove_fixedeffects(f::FormulaTerm)
     return FormulaTerm(f.lhs, Tuple(new_rhs))
 end
 
-function replace_lhs(f::FormulaTerm, new_lhs::Symbol)
-    return Term(new_lhs) ~ f.rhs
-end
 
+"""
+    get_coefficient_names_nofe(formula::FormulaTerm, data::DataFrame)
 
-
+Return the response name and coefficient names after excluding fixed-effect
+terms from `formula`.
+"""
 function get_coefficient_names_nofe(formula::FormulaTerm, data::DataFrame)
     formula = remove_fixedeffects(formula)
     schema = StatsModels.schema(formula, data)
@@ -87,11 +94,17 @@ function get_coefficient_names_nofe(formula::FormulaTerm, data::DataFrame)
 end
 
 
-# custom ols solver, modified from Regress ols() since we don't need inference
 ############################################################
 ### OLS SOLVER
 ############################################################
+"""
+    ils_solver(X, y; factorization = :auto, collinearity = :qr, tol = 1e-8,
+               weights = nothing, has_intercept = true) -> ILSEstimator
 
+Fit the weighted least-squares step used by iterative least squares (ILS).
+This is a lightweight OLS solver for internal probit iterations, returning
+coefficients and the non-collinear coefficient mask without inference results.
+"""
 function ils_solver(X::AbstractMatrix{<:Real}, y::AbstractVector{<:Real};
         factorization::Symbol = :auto,
         collinearity::Symbol = :qr,
@@ -151,6 +164,28 @@ function ils_solver(X::AbstractMatrix{<:Real}, y::AbstractVector{<:Real};
     )
 end
 
+############################################################
+### Probit specific likelihood helper
+############################################################
+"""
+    log_likelihood_probit(y, eta)
+
+Return the score, observed information, and log-likelihood contribution for a
+single probit observation with response `y` and linear predictor `eta`.
+"""
+function log_likelihood_probit(y,eta)
+    if y == 1
+        gi = exp(normlogpdf(eta)-normlogcdf(eta))
+        hi = gi^2 + eta * gi
+        di = normlogcdf(eta)
+    else
+        gi = - exp(normlogpdf(eta)-normlogccdf(eta)) 
+        hi = gi^2 + eta*gi
+        di = normlogccdf(eta)
+    end
+    return (gi, hi,di)
+end
+
 
 ############################################################
 ### FIT PROBIT
@@ -158,17 +193,27 @@ end
 """
     fit_probit(data, formula, beta0, max_iter, tolerance) -> BinaryEstimator
 
-Estimate a probit model with fixed effects using Iteratively Reweighted Least Squares (IRLS).
+Estimate a binary-response probit model, optionally absorbing fixed effects
+specified with `fe(...)` terms in `formula`.
+
+The estimator uses iterative reweighted least squares. At each iteration, fixed
+effects are partialled out before solving the weighted least-squares update for
+the slope coefficients.
 
 # Arguments
-- `data::DataFrame`: Input dataset. 
-- `formula::FormulaTerm`: A `StatsModels.jl` formula created using `@formula(y ~ x1 + x2 + fe(group))`.
-- `beta0::Vector` : Initial guess for the coefficient vector β.
-- `max_iter::Int`  : Maximum number of iterations allowed.
-- `tolerance::Real` : Convergence threshold based on the norm of successive β updates.
+- `data`: Input table containing the response, regressors, and fixed-effect
+  variables.
+- `formula::FormulaTerm`: A `StatsModels.jl` formula, for example
+  `@formula(y ~ x1 + x2 + fe(group))`.
+- `beta0::Vector`: Initial coefficient vector for the non-fixed-effect
+  regressors.
+- `max_iter::Integer`: Maximum number of IRLS iterations.
+- `tolerance::Real`: Convergence tolerance for the deviance update.
 
-# Returns 
-
+# Returns
+- `BinaryEstimator`: Fitted model containing the response, fitted
+  probabilities, coefficient estimates, model matrix, formula, and coefficient
+  names.
 """
 function fit_probit(
     @nospecialize(data),
@@ -336,27 +381,4 @@ function fit_probit(
         coef_names_str
     )
     return estimator
-end
-
-
-
-"""
-An helper function for fit_probit, it computes the score and the Hessian
-Input:  
-- a pdf
-- a cdf
-- a value of y_i  
-computes the score of the log likelihood wrt eta and the hessian matrix 
-"""
-function log_likelihood_probit(y,eta)
-    if y == 1
-        g_i = exp(normlogpdf(eta)-normlogcdf(eta))
-        h_i = g_i^2 + eta * g_i
-        di = normlogcdf(eta)
-    else
-        g_i = - exp(normlogpdf(eta)-normlogccdf(eta)) 
-        h_i = g_i^2 + eta*g_i
-        di = normlogccdf(eta)
-    end
-    return (g_i, h_i,di)
 end
