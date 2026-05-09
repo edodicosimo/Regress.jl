@@ -105,7 +105,7 @@ function drop_term(f::FormulaTerm, sym::String)
     return f.lhs ~ sum(rhs_terms)
 end
 
-# custom ols solver, modified from Regress ols() since we don't need overhead
+# custom ols solver, modified from Regress ols() since we don't need inference
 ############################################################
 ### OLS SOLVER
 ############################################################
@@ -161,6 +161,8 @@ function ils_solver(X::AbstractMatrix{<:Real}, y::AbstractVector{<:Real};
     pp, basis_coef,
     _ = Regress.fit_ols_core!(rr, X_mat, factorization;
         tol = tol, save_matrices = true, collinearity = collinearity)
+
+
 
     return ILSEstimator{T, typeof(pp)}(
         rr, pp, basis_coef
@@ -270,21 +272,19 @@ function fit_probit(
                 weights= hi
             )
 
+        basis_coef_mask = basis_coef(wls)
         betanew = Regress.coef(wls)
 
-        PO = [feM, iterations,
-        converged,
-        tss_partial,
-        oldz,
-        oldX]
+
         newfes, b, c = Regress.solve_coefficients!(
             oldz - oldX * betanew,
             feM;
             tol = 1e-6,
             maxiter = 1000
         )
-
-        X = oldX
+        betanew = betanew[basis_coef_mask]
+        X = oldX[:,basis_coef_mask]
+        coef_names_str = coef_names_str[basis_coef_mask]
         
         alpha = stack(newfes)
 

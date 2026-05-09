@@ -47,6 +47,8 @@ function StatsAPI.coef(m::ILSEstimator)
     return beta
 end
 
+basis_coef(m::ILSEstimator) = m.basis_coef
+
 
 ########
 has_iv(::BinaryEstimator) = false
