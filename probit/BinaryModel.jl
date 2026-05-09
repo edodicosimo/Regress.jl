@@ -34,7 +34,21 @@ struct BinaryEstimator{T <: AbstractFloat} <: AbstractRegressModel
     coefnames::Vector{String}
 end
 
+struct ILSEstimator{T <: AbstractFloat, P <: Regress.OLSLinearPredictor{T}} <:
+       AbstractRegressModel
+    rr::Regress.OLSResponse{T}              # Response object
+    pp::P                           # Predictor object (Chol or QR)
+    basis_coef::BitVector           # Which coefficients are not collinear
+end
 
+function StatsAPI.coef(m::ILSEstimator)
+    beta = copy(m.pp.beta)
+    beta[.!m.basis_coef] .= zero(eltype(beta))
+    return beta
+end
+
+
+########
 has_iv(::BinaryEstimator) = false
 has_fe(m::BinaryEstimator) = Regress.has_fe(m.formula)
 
