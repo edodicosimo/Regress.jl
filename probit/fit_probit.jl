@@ -38,7 +38,7 @@ function select_columns(df::DataFrame, formula::FormulaTerm)
     for (j,name) in enumerate(Xnames)
         out[!, name] = X[j]
     end
-    return (out, reduce(hcat,X_without_fe), vec(y))
+    return (schema, formula_schema,out, reduce(hcat,X_without_fe), vec(y))
     
 end
 
@@ -157,7 +157,6 @@ function ils_solver(X::AbstractMatrix{<:Real}, y::AbstractVector{<:Real};
         tol = tol, save_matrices = true, collinearity = collinearity)
 
 
-
     return ILSEstimator{T, typeof(pp)}(
         rr, pp, basis_coef
     )
@@ -226,7 +225,7 @@ function fit_probit(
     ###############################################
 
     #parse the formula and return a dataframe with only the needed columns, X::Matrix, y::Vector.
-    data, X, y = select_columns(data, formula)
+    schema, formula_schema, data, X, y = select_columns(data, formula)
 
     # store coefficient names for model summary, ignroes fe variables
     response_name, coef_names_str = get_coefficient_names_nofe(formula, data)
@@ -252,6 +251,7 @@ function fit_probit(
     v = log_likelihood_probit.(y,eta)
     total_log_likelihood = sum(getindex.(v,3)) 
     deviance = -2 * total_log_likelihood
+    basis_coef_mask = falses(0)
 
     ###############################################
     ############ ESTIMATION LOOP ##################
@@ -356,28 +356,30 @@ function fit_probit(
 
  rr = BinaryResponse{Float64}(
         y,
-        fitted_probabilities, #FIXME non so se ci va yhat qua, cosa sono i valori fittati nel probit?
-        Vector{Float64}(),
-        Vector{Float64}(),
-        response_name #FIXME
+        fitted_probabilities, 
+        Vector{Float64}(), #Weights
+        Vector{Float64}(), #offset
+        response_name 
 
     )
     pp = BinaryPredictorQR{Float64}(
         X,
-        Matrix{Float64}(undef,0,0),
+        Matrix{Float64}(undef,0,0), #non collinear columns
         beta
     )
     estimator = BinaryEstimator{Float64}(
         rr,
         pp,
         formula,
+        formula_schema,
         size(data,1),
         0,
         0.0,
         tss,
         true,
         0,
-        coef_names_str
+        coef_names_str,
+        basis_coef_mask #FIXME this gives all 1 because in the loop collinear columns are dropped, and only non collinear columns are left in the last iteration
     )
     return estimator
 end

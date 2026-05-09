@@ -18,22 +18,7 @@ mutable struct BinaryPredictorQR{T}
     # qr::LinearAlgebra.QRCompactWY{T, Matrix{T}} # QR factorization of X_reduced #TODO add QR factorization 
 end
 
-
-struct BinaryEstimator{T <: AbstractFloat} <: AbstractRegressModel
-    rr :: BinaryResponse{T}
-    pp :: BinaryPredictorQR{T}
-    formula::FormulaTerm
-    n_observations::Int      
-    n_parameters::Int        
-    rss::Float64             
-    tss::Float64             
-    has_fixed_effects::Bool  
-    fixed_effects_dof::Int   
-    
-    # Coefficient metadatas
-    coefnames::Vector{String}
-end
-
+##########
 struct ILSEstimator{T <: AbstractFloat, P <: Regress.OLSLinearPredictor{T}} <:
        AbstractRegressModel
     rr::Regress.OLSResponse{T}              # Response object
@@ -51,8 +36,32 @@ basis_coef(m::ILSEstimator) = m.basis_coef
 
 
 ########
+
+struct BinaryEstimator{T <: AbstractFloat} <: AbstractRegressModel
+    rr :: BinaryResponse{T}
+    pp :: BinaryPredictorQR{T}
+
+    # Formula and metadata
+    formula::FormulaTerm
+    formula_schema::FormulaTerm
+
+    n_observations::Int      
+    n_parameters::Int        
+    rss::Float64             
+    tss::Float64             
+    has_fixed_effects::Bool  
+    fixed_effects_dof::Int   
+    
+    # Coefficient metadatas
+    coefnames::Vector{String}
+    basis_coef::BitVector
+end
+
 has_iv(::BinaryEstimator) = false
 has_fe(m::BinaryEstimator) = Regress.has_fe(m.formula)
+
+
+basis_coef(m::BinaryEstimator) = m.basis_coef
 
 StatsAPI.islinear(::BinaryEstimator) = false
 StatsAPI.coefnames(m::BinaryEstimator) = m.coefnames #return coefficient names NO FE variables
