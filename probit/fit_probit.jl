@@ -105,6 +105,111 @@ function drop_term(f::FormulaTerm, sym::String)
     return f.lhs ~ sum(rhs_terms)
 end
 
+# custom ols solver, modified from Regress ols() since we don't need overhead
+############################################################
+### OLS SOLVER
+############################################################
+
+function ils_solver(X::AbstractMatrix{<:Real}, y::AbstractVector{<:Real};
+        factorization::Symbol = :auto,
+        collinearity::Symbol = :qr,
+        tol::Real = 1e-8,
+        weights::Union{Nothing, AbstractVector} = nothing,
+        has_intercept::Bool = true)
+
+    # Validate inputs
+    n, k = size(X)
+    length(y) == n ||
+        throw(DimensionMismatch("X has $n rows but y has $(length(y)) elements"))
+
+    # Validate keywords
+    factorization in (:auto, :chol, :qr) ||
+        throw(ArgumentError("factorization must be :auto, :chol, or :qr, got :$factorization"))
+    collinearity in (:qr, :sweep) ||
+        throw(ArgumentError("collinearity must be :qr or :sweep, got :$collinearity"))
+
+    # Determine numeric type
+    T = promote_type(eltype(X), eltype(y))
+    T <: AbstractFloat || (T = Float64)
+
+    # Convert to Matrix{T} and Vector{T} (materializes views)
+    X_mat = convert(Matrix{T}, X)
+    y_vec = convert(Vector{T}, y)
+
+    # Handle weights
+    has_weights = weights !== nothing
+    if has_weights
+        length(weights) == n || throw(DimensionMismatch("weights must have length $n"))
+        wts_vec = convert(Vector{T}, weights)
+        sqrtw = sqrt.(wts_vec)
+        X_mat = X_mat .* sqrtw
+        y_vec = y_vec .* sqrtw
+    else
+        wts_vec = T[]
+    end
+
+    # Choose factorization
+    if factorization == :auto
+        factorization = k < 100 ? :chol : :qr
+    end
+
+    # Build response object
+    mu = similar(y_vec)
+    rr = Regress.OLSResponse(y_vec, mu, wts_vec, T[], :y)
+
+    # Compute TSS (before fitting, for R² calculation)
+    if has_intercept
+        ymean = mean(y_vec)
+        tss = sum(abs2, y_vec .- ymean)
+    else
+        # For models without intercept, TSS = sum(y^2)
+        tss = sum(abs2, y_vec)
+    end
+
+    # Fit using unified solver
+    pp, basis_coef,
+    _ = Regress.fit_ols_core!(rr, X_mat, factorization;
+        tol = tol, save_matrices = true, collinearity = collinearity)
+
+    # Compute RSS efficiently
+    rss = Regress.compute_rss(rr.y, rr.mu)
+
+    # Degrees of freedom
+    dof_model = sum(basis_coef)
+    dof_res = max(1, n - dof_model)
+
+    # R-squared
+    r2_val = 1 - rss / tss
+
+    # Compute default HC1 vcov and statistics
+    residuals_vcov = rr.y .- rr.mu
+    invXX = Regress.invchol(pp)
+
+    vcov_matrix = Regress.compute_hc1_vcov_direct(
+        pp.X, residuals_vcov, invXX, basis_coef,
+        n, dof_model, 0, dof_res  # No fixed effects
+    )
+
+    # Standard errors
+    se = sqrt.(diag(vcov_matrix))
+
+    # t-statistics and p-values
+    coef_vec = copy(pp.beta)
+    coef_vec[.!basis_coef] .= zero(T)
+    t_stats = coef_vec ./ se
+    p_values = 2 .* tdistccdf.(dof_res, abs.(t_stats))
+
+    # Default vcov estimator (HC1)
+    default_vcov = CovarianceMatrices.HC1()
+
+    return Regress.OLSMatrixEstimator{T, typeof(pp), typeof(default_vcov)}(
+        rr, pp, basis_coef,
+        n, dof_model, dof_res,
+        T(rss), T(tss), T(r2_val), has_intercept,
+        default_vcov, vcov_matrix, se, t_stats, p_values
+    )
+end
+
 
 ############################################################
 ### FIT PROBIT
@@ -202,7 +307,7 @@ function fit_probit(
             Float64
         ) # this modifies X and z in place
 
-        wls = Regress.ols(
+        wls = ils_solver(
                 X,
                 zi,
                 weights= hi
@@ -316,4 +421,3 @@ function log_likelihood_probit(y,eta)
     end
     return (g_i, h_i,di)
 end
-
