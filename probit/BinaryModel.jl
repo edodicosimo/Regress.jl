@@ -52,6 +52,10 @@ function StatsAPI.response(m::BinaryEstimator)
     m.rr.y
 end
 
+function StatsAPI.residuals(m::BinaryEstimator)
+    m.rr.y - m.rr.mu
+end
+
 function StatsAPI.modelmatrix(m::BinaryEstimator)
     m.pp.X
 end
