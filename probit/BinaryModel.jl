@@ -11,12 +11,20 @@ mutable struct BinaryResponse{T <: AbstractFloat}
     response_name::Symbol
 end 
 
-mutable struct BinaryPredictorQR{T}
+mutable struct BinaryPredictorQR{T <: AbstractFloat, W <: AbstractWeights}
     X::Matrix{T}
-    X_reduced::Matrix{T} #FIXME Non collinear columns only
-    beta::Vector{T}            # Coefficient estimates (full, with NaN)
+    X_reduced::Matrix{T} #FIXME Non collinear columns only #vector of columns used for the demeaning
+    beta::Vector{T}            # coefficient estimates before last cycle update
+    deltaBeta::Vector{T}
+    scratchBeta::Vector{T}   #temporary allocation for computation
+    weights::W
+    tildaX::Matrix{T} #to put demeaned X
+    z::Vector{T}
+    tildaz::Vector{T}
     # qr::LinearAlgebra.QRCompactWY{T, Matrix{T}} # QR factorization of X_reduced #TODO add QR factorization 
 end
+
+
 
 ##########
 struct ILSEstimator{T <: AbstractFloat, P <: Regress.OLSLinearPredictor{T}} <:

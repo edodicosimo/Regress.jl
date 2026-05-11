@@ -230,9 +230,6 @@ function fit_probit(
     # store coefficient names for model summary, ignroes fe variables
     response_name, coef_names_str = get_coefficient_names_nofe(formula, data)
 
-    #initialize beta with the user inputed values
-    beta = beta0
-
     #initialize alpha to all 0 and append it to the dataframe
     alpha = zeros(size(X,1))
     
@@ -246,37 +243,49 @@ function fit_probit(
     formula, formula_fes = Regress.parse_fe(formula)
     fes, feids, fekeys = Regress.parse_fixedeffect(data, formula_fes)
 
+
+    ## Instantiate response object
+    pp = BinaryPredictorQR{Float64,Weights}(
+            X,similar(X),
+            beta0,similar(beta0),
+            similar(beta0),Weights(ones(length(y))),
+            similar(X),similar(y), similar(y)
+        )
+
     #Initialize variables
-    eta = X * beta
+    eta = pp.X * pp.beta
     v = log_likelihood_probit.(y,eta)
     total_log_likelihood = sum(getindex.(v,3)) 
     deviance = -2 * total_log_likelihood
-    basis_coef_mask = falses(0)
+    basis_coef_mask = trues(length(beta0))
+    beta = copy(pp.beta)
 
     ###############################################
     ############ ESTIMATION LOOP ##################
     ###############################################
     i = 0
     for _ in 1:max_iter
-        i += 1
-
+        println(i)
+        X̃, X = pp.tildaX, pp.X
+        z̃, z = pp.tildaz,pp.z
+        copyto!(X̃,X)
         #compute the score (gi) and Hessian (hi) of the likelihood wrt eta
         gi = getindex.(v, 1)
         hi = getindex.(v, 2)
         
         # compute working response and append to the df 
-        zi = eta .+ (gi./hi) 
+        z̃ .= eta .+ (gi./hi) 
+        copyto!(z,z̃)
         
         # create a vector of vectors with zi and then all the columns of X, to then pass it to partialout
         # this will be modified in place
-        cols = Vector{AbstractVector{Float64}}(collect(eachcol(X)))
-        pushfirst!(cols, zi)
+        cols = Vector{AbstractVector{Float64}}(collect(eachcol(X̃))) #this is a view so it does not allocate
+        pushfirst!(cols, z̃) 
 
         feM, iterations,
         converged,
         tss_partial,
-        oldz,
-        oldX= Regress.partial_out_fixed_effects!(
+        _,_ = Regress.partial_out_fixed_effects!(
             cols,
             coef_names_str,
             fes,
@@ -286,32 +295,27 @@ function fit_probit(
             1e-6,
             10000,
             true,
-            true, #we need to always save fixed effects,
+            false,
             true, 
             true, 
             Float64
         ) # this modifies X and z in place
 
         wls = ils_solver(
-                X,
-                zi,
+                X̃,
+                z̃,
                 weights= hi
             )
 
-        basis_coef_mask = basis_coef(wls)
         betanew = Regress.coef(wls)
 
 
         newfes, b, c = Regress.solve_coefficients!(
-            oldz - oldX * betanew,
+            z - X * betanew,
             feM;
             tol = 1e-6,
             maxiter = 1000
         )
-        betanew = betanew[basis_coef_mask]
-        X = oldX[:,basis_coef_mask]
-        coef_names_str = coef_names_str[basis_coef_mask]
-        
         alpha = stack(newfes)
 
         # Compute eta(t) = X * beta + alpha(t) using current iteration alpha but original X
@@ -338,8 +342,8 @@ function fit_probit(
             break
         end
         deviance = deviance_new
-        beta = betanew
-        
+        pp.beta = betanew
+        i += 1
     end
 
     ################################
@@ -354,18 +358,12 @@ function fit_probit(
     ## Construct Return Objects
     ################################
 
- rr = BinaryResponse{Float64}(
-        y,
-        fitted_probabilities, 
-        Vector{Float64}(), #Weights
-        Vector{Float64}(), #offset
-        response_name 
-
-    )
-    pp = BinaryPredictorQR{Float64}(
-        X,
-        Matrix{Float64}(undef,0,0), #non collinear columns
-        beta
+    rr = BinaryResponse{Float64}(
+        convert(Vector{Float64}, y),
+        fitted_probabilities,
+        Vector{Float64}(),
+        Vector{Float64}(),
+        response_name
     )
     estimator = BinaryEstimator{Float64}(
         rr,
@@ -379,7 +377,7 @@ function fit_probit(
         true,
         0,
         coef_names_str,
-        basis_coef_mask #FIXME this gives all 1 because in the loop collinear columns are dropped, and only non collinear columns are left in the last iteration
+        trues(length(coef_names_str))
     )
     return estimator
 end
