@@ -243,6 +243,16 @@ function fit_probit(
     formula, formula_fes = Regress.parse_fe(formula)
     fes, feids, fekeys = Regress.parse_fixedeffect(data, formula_fes)
 
+    ## Instantiate response object
+    rrr = BinaryResponse{Float64}(
+        y,
+        Normal(0,1),
+        similar(y),
+        similar(y),
+        similar(y),
+        similar(y),
+        response_name
+    )
 
     ## Instantiate predictor object
     pp = BinaryPredictorQR{Float64,Weights}(
@@ -251,7 +261,6 @@ function fit_probit(
             similar(beta0),Weights(ones(length(y))),
             similar(X),similar(y), similar(y)
         )
-    
 
     #Initialize variables
     eta = pp.X * pp.beta
@@ -358,6 +367,8 @@ function fit_probit(
 
     rr = BinaryResponse{Float64}(
         convert(Vector{Float64}, y),
+        Normal(0,1),
+        Vector{Float64}(),
         fitted_probabilities,
         Vector{Float64}(),
         Vector{Float64}(),

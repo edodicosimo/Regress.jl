@@ -4,7 +4,9 @@ using StatsAPI
 using StatsBase
 
 mutable struct BinaryResponse{T <: AbstractFloat}
-    y::Vector{T} #the independent variable 
+    y::Vector{T} #observed response vector
+    distribution::Distribution #assumed distribution of the response
+    eta::Vector{T}
     mu::Vector{T} #fitted values
     wts::Vector{T} #weights
     offset::Vector{T} # Offset (empty = no offset, for GLM compatibility)
