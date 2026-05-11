@@ -244,13 +244,14 @@ function fit_probit(
     fes, feids, fekeys = Regress.parse_fixedeffect(data, formula_fes)
 
 
-    ## Instantiate response object
+    ## Instantiate predictor object
     pp = BinaryPredictorQR{Float64,Weights}(
             X,similar(X),
             beta0,similar(beta0),
             similar(beta0),Weights(ones(length(y))),
             similar(X),similar(y), similar(y)
         )
+    
 
     #Initialize variables
     eta = pp.X * pp.beta
@@ -273,7 +274,7 @@ function fit_probit(
         gi = getindex.(v, 1)
         hi = getindex.(v, 2)
         
-        # compute working response and append to the df 
+        # compute working response 
         z̃ .= eta .+ (gi./hi) 
         copyto!(z,z̃)
         
@@ -282,10 +283,7 @@ function fit_probit(
         cols = Vector{AbstractVector{Float64}}(collect(eachcol(X̃))) #this is a view so it does not allocate
         pushfirst!(cols, z̃) 
 
-        feM, iterations,
-        converged,
-        tss_partial,
-        _,_ = Regress.partial_out_fixed_effects!(
+        feM, _,_,_,_,_ = Regress.partial_out_fixed_effects!(
             cols,
             coef_names_str,
             fes,
@@ -310,7 +308,7 @@ function fit_probit(
         betanew = Regress.coef(wls)
 
 
-        newfes, b, c = Regress.solve_coefficients!(
+        newfes, _ , _ = Regress.solve_coefficients!(
             z - X * betanew,
             feM;
             tol = 1e-6,
