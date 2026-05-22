@@ -191,33 +191,7 @@ function log_likelihood_probit(y,eta)
 end
 
 
-"""
-    buildBinaryResponse(yi, pp::BinaryPredictorQR, responsename) -> BinaryResponse
 
-Construct a `BinaryResponse` from initial response vector `yi`, predictor `pp`,
-and the response variable name. Computes the initial linear predictor `eta`,
-log-likelihood contributions, and deviance.
-"""
-function buildBinaryResponse(yi,pp::BinaryPredictorQR,responsename)
-    T = eltype(pp.beta)
-    yi = T.(yi)
-    eta = pp.X * pp.beta
-    v = log_likelihood_probit.(yi,eta)
-    total_log_likelihood = sum(getindex.(v,3)) 
-    deviance = -2 * total_log_likelihood
-    rr = BinaryResponse(
-        yi,
-        Normal(0,1),
-        v,
-        deviance,
-        0.0,
-        eta,
-        similar(yi), # fitted probabilities
-        similar(yi), # weights
-        similar(yi), #offset
-        responsename 
-    )
-end
 
 
 """
@@ -374,7 +348,7 @@ function fit_probit(
 
 
     ## Instantiate response object
-    rr = buildBinaryResponse(y,pp,response_name)
+    rr = BinaryResponse(y,pp,response_name)
     
     beta = copy(pp.beta)
 
@@ -430,7 +404,7 @@ function fit_probit(
     ## Summary statistics
     ################################
 
-    rr.mu = normcdf.(rr.eta)
+    rr.mu = normcdf.(rr.eta) #FIXME need to also use alpha??
     println("Convergence reached after $i iterations")
     return m
 end

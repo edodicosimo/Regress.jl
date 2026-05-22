@@ -35,6 +35,7 @@ mutable struct BinaryResponse{T <: AbstractFloat}
     response_name::Symbol
 end
 
+
 function StatsAPI.deviance(rr::BinaryResponse)
     total_log_likelihood = sum(getindex.(rr.v, 3))
     return -2 * total_log_likelihood
@@ -70,6 +71,35 @@ mutable struct BinaryPredictorQR{T <: AbstractFloat, W <: AbstractWeights}
     tildaz::Vector{T}
     # qr::LinearAlgebra.QRCompactWY{T, Matrix{T}} #TODO add QR factorization
 end
+
+"""
+    buildBinaryResponse(yi, pp::BinaryPredictorQR, responsename) -> BinaryResponse
+
+Construct a `BinaryResponse` from initial response vector `yi`, predictor `pp`,
+and the response variable name. Computes the initial linear predictor `eta`,
+log-likelihood contributions, and deviance.
+"""
+function BinaryResponse(yi,pp::BinaryPredictorQR,responsename)
+    T = eltype(pp.beta)
+    yi = T.(yi)
+    eta = pp.X * pp.beta
+    v = log_likelihood_probit.(yi,eta)
+    total_log_likelihood = sum(getindex.(v,3)) 
+    deviance = -2 * total_log_likelihood
+    rr = BinaryResponse(
+        yi,
+        Normal(0,1),
+        v,
+        deviance,
+        0.0,
+        eta,
+        similar(yi), # fitted probabilities
+        similar(yi), # weights
+        similar(yi), #offset
+        responsename 
+    )
+end
+
 
 # ── ILS inner model ───────────────────────────────────────────────────────────
 
