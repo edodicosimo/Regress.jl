@@ -279,6 +279,7 @@ function stephalving!(m::BinaryEstimator,alpha_sum)
         pp = m.pp
         steps = 0
         while rr.deviance < rr.deviance_new && steps < 26
+            println("Step-halving iteration $(steps), deviance = $(deviance), new deviance = $(deviance_new)")
             pp.beta_new = (pp.beta .+ pp.beta_new) ./ 2
             rr.eta = pp.X * pp.beta_new .+ alpha_sum
             rr.v = log_likelihood_probit.(rr.y,rr.eta)
@@ -429,7 +430,7 @@ function fit_probit(
     ## Summary statistics
     ################################
 
-    fitted_probabilities = normcdf.(rr.eta)
+    rr.mu = normcdf.(rr.eta)
     println("Convergence reached after $i iterations")
     return m
 end
