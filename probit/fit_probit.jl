@@ -12,10 +12,15 @@ include("BinaryModel.jl")
 ### HELPER FUNCTION TO CLEAN DATA
 #######################################
 """
-    select_columns(df::DataFrame, formula::FormulaTerm) -> data, X, y
+    select_columns(df::DataFrame, formula::FormulaTerm)
+        -> (schema, formula_schema, data, X_without_fe, y)
 
-Return a reduced data frame, model matrix, and response vector using only the
-variables referenced by `formula`.
+Parse `formula` against `df` and return:
+- `schema`: the `StatsModels` schema
+- `formula_schema`: the schema-applied formula
+- `data`: `DataFrame` containing only the columns referenced by `formula`
+- `X_without_fe`: model matrix with `fe(...)` terms excluded
+- `y`: response vector
 """
 function select_columns(df::DataFrame, formula::FormulaTerm)
     formula_without_fe = remove_fixedeffects(formula)
@@ -100,9 +105,10 @@ end
     ils_solver(X, y; factorization = :auto, collinearity = :qr, tol = 1e-8,
                weights = nothing, has_intercept = true) -> ILSEstimator
 
-Fit the weighted least-squares step used by iterative least squares (ILS).
-This is a lightweight OLS solver for internal probit iterations, returning
-coefficients and the non-collinear coefficient mask without inference results.
+Fit the weighted least-squares step used by iterative least squares (ILS).  
+This is a lightweight WLS solver for internal probit iterations, returning
+an `ILSEstimator` containing the response object, predictor object, and
+basis coefficient mask, without full inference results.
 """
 function ils_solver(X::AbstractMatrix{<:Real}, y::AbstractVector{<:Real};
         factorization::Symbol = :auto,
@@ -185,6 +191,13 @@ function log_likelihood_probit(y,eta)
 end
 
 
+"""
+    buildBinaryResponse(yi, pp::BinaryPredictorQR, responsename) -> BinaryResponse
+
+Construct a `BinaryResponse` from initial response vector `yi`, predictor `pp`,
+and the response variable name. Computes the initial linear predictor `eta`,
+log-likelihood contributions, and deviance.
+"""
 function buildBinaryResponse(yi,pp::BinaryPredictorQR,responsename)
     T = eltype(pp.beta)
     yi = T.(yi)
@@ -207,6 +220,15 @@ function buildBinaryResponse(yi,pp::BinaryPredictorQR,responsename)
 end
 
 
+"""
+    update_predictor!(m::BinaryEstimator, fes) -> feM
+
+Perform one IRLS predictor update. Computes the working response `tildaz` and
+working weights from the current score and observed information, partials out
+fixed effects `fes` from both the working response and model matrix, solves the
+weighted least-squares problem, and stores the result in `pp.beta_new`.
+Returns the `FixedEffectMatrix` `feM` from the demeaning step.
+"""
 function update_predictor!(m::BinaryEstimator,fes)
         rr = m.rr
         pp = m.pp
@@ -244,6 +266,13 @@ end
 
 
 
+"""
+    stephalving!(m::BinaryEstimator, alpha_sum)
+
+Apply step-halving to ensure the deviance does not increase. Repeatedly
+bisects the step from `pp.beta` to `pp.beta_new` (up to 26 halvings) until
+`rr.deviance_new ≤ rr.deviance`.
+"""
 function stephalving!(m::BinaryEstimator,alpha_sum)
         rr = m.rr
         pp = m.pp
@@ -257,6 +286,14 @@ function stephalving!(m::BinaryEstimator,alpha_sum)
         end
 end
 
+"""
+    update_response!(m, alphanew)
+
+Update the response object after a predictor step. Recomputes `rr.eta` using
+`pp.beta_new` and the new fixed-effect sum `alphanew`, refreshes the
+log-likelihood contributions `rr.v` and `rr.deviance_new`, then calls
+`stephalving!` if needed to enforce deviance decrease.
+"""
 function update_response!(m, alphanew)
     rr = m.rr
     pp = m.pp
