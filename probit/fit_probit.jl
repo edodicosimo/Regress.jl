@@ -279,10 +279,10 @@ function stephalving!(m::BinaryEstimator,alpha_sum)
         pp = m.pp
         steps = 0
         while rr.deviance < rr.deviance_new && steps < 26
-            pp.beta_new = (pp.beta .+ pp.beta_new) ./2
+            pp.beta_new = (pp.beta .+ pp.beta_new) ./ 2
             rr.eta = pp.X * pp.beta_new .+ alpha_sum
-            pp.v = log_likelihood_probit.(y,eta)
-            deviance_new = deviance(rr)
+            rr.v = log_likelihood_probit.(rr.y,rr.eta)
+            rr.deviance_new = deviance(rr)
             steps += 1
         end
 end
@@ -386,7 +386,7 @@ function fit_probit(
             0,
             0.0,
             tss,
-            true,
+            Regress.has_fe(formula_fes),
             0,
             coef_names_str,
             trues(length(coef_names_str))
@@ -400,18 +400,21 @@ function fit_probit(
     for _ in 1:max_iter
         feM = update_predictor!(m,fes)
 
-        newfes, _ , _ = Regress.solve_coefficients!(
-            pp.z - pp.X * pp.beta_new,
-            feM;
-            tol = 1e-6,
-            maxiter = 1000
-        )
-        alpha = stack(newfes)
+        if m.has_fixed_effects
+            newfes, _ , _ = Regress.solve_coefficients!(
+                pp.z - pp.X * pp.beta_new,
+                feM;
+                tol = 1e-6,
+                maxiter = 1000
+            )
+            alpha = stack(newfes)
+            #if there are more than one fe we are interested only in the sum of them
+            alpha_sum = alpha isa AbstractVector ? alpha : vec(sum(alpha, dims = 2)) 
+        else
+            alpha_sum = alpha
+        end
 
-        # Compute eta(t) = X * beta + alpha(t) using current iteration alpha but original X
-        alpha_sum = alpha isa AbstractVector ? alpha : vec(sum(alpha, dims = 2))
-        
-       update_response!(m,alpha_sum)
+        update_response!(m,alpha_sum)
         
         if norm(rr.deviance_new - rr.deviance) / (0.1 + norm(rr.deviance_new))  < tolerance
             pp.beta = pp.beta_new
