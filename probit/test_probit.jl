@@ -26,4 +26,3 @@ rwm_data[!, :visit_dummy] = ifelse.(rwm_data.docvis .> 0, 1, 0)
     1e-6    
     )
 
-

@@ -6,6 +6,9 @@ using StatsBase
 mutable struct BinaryResponse{T <: AbstractFloat}
     y::Vector{T} #observed response vector
     distribution::Distribution #assumed distribution of the response
+    v::Vector{Tuple{T,T,T}} # Tuple containing (score, hessian, likelihood) for each observation
+    deviance::T
+    deviance_new::T # scrape space pre allocated to store the new deviance at each iteration
     eta::Vector{T}
     mu::Vector{T} #fitted values
     wts::Vector{T} #weights
@@ -13,12 +16,17 @@ mutable struct BinaryResponse{T <: AbstractFloat}
     response_name::Symbol
 end 
 
+function StatsAPI.deviance(rr::BinaryResponse)
+    total_log_likelihood = sum(getindex.(rr.v,3))
+    deviance = -2 * total_log_likelihood
+end
+
 mutable struct BinaryPredictorQR{T <: AbstractFloat, W <: AbstractWeights}
     X::Matrix{T}
     X_reduced::Matrix{T} #FIXME Non collinear columns only #vector of columns used for the demeaning
     beta::Vector{T}            # coefficient estimates before last cycle update
     deltaBeta::Vector{T}
-    scratchBeta::Vector{T}   #temporary allocation for computation
+    beta_new::Vector{T}   #temporary allocation for computation
     weights::W
     tildaX::Matrix{T} #to put demeaned X
     z::Vector{T}

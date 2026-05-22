@@ -185,6 +185,88 @@ function log_likelihood_probit(y,eta)
 end
 
 
+function buildBinaryResponse(yi,pp::BinaryPredictorQR,responsename)
+    T = eltype(pp.beta)
+    yi = T.(yi)
+    eta = pp.X * pp.beta
+    v = log_likelihood_probit.(yi,eta)
+    total_log_likelihood = sum(getindex.(v,3)) 
+    deviance = -2 * total_log_likelihood
+    rr = BinaryResponse(
+        yi,
+        Normal(0,1),
+        v,
+        deviance,
+        0.0,
+        eta,
+        similar(yi), # fitted probabilities
+        similar(yi), # weights
+        similar(yi), #offset
+        responsename 
+    )
+end
+
+
+function update_predictor!(m::BinaryEstimator,fes)
+        rr = m.rr
+        pp = m.pp
+        gi = getindex.(rr.v, 1)
+        hi = getindex.(rr.v, 2)
+        copyto!(pp.tildaX,pp.X)
+        pp.tildaz .= rr.eta .+ (gi ./ hi) 
+        copyto!(pp.z,pp.tildaz) #dest,source
+        cols = Vector{AbstractVector{Float64}}(collect(eachcol(pp.tildaX))) #this is a view so it does not allocate
+        pushfirst!(cols, pp.tildaz) 
+        feM, _,_,_,_,_ = Regress.partial_out_fixed_effects!(
+                        cols,
+            m.coefnames,
+            fes,
+            Weights(hi),
+            :cpu, # TODO make this an argument,
+            Threads.nthreads(),
+            1e-6,
+            10000,
+            true,
+            false,
+            true, 
+            true, 
+            Float64
+        ) # this modifies X and z in place
+
+        wls = ils_solver(
+            pp.tildaX,
+            pp.tildaz,
+            weights= hi
+        )
+        pp.beta_new = Regress.coef(wls)
+        return feM
+end
+
+
+
+function stephalving!(m::BinaryEstimator,alpha_sum)
+        rr = m.rr
+        pp = m.pp
+        steps = 0
+        while rr.deviance < rr.deviance_new && steps < 26
+            pp.beta_new = (pp.beta .+ pp.beta_new) ./2
+            rr.eta = pp.X * pp.beta_new .+ alpha_sum
+            pp.v = log_likelihood_probit.(y,eta)
+            deviance_new = deviance(rr)
+            steps += 1
+        end
+end
+
+function update_response!(m, alphanew)
+    rr = m.rr
+    pp = m.pp
+    rr.eta = pp.X * pp.beta_new .+ alphanew
+    rr.v = log_likelihood_probit.(rr.y,rr.eta)
+    rr.deviance_new = deviance(rr)
+    stephalving!(m,alphanew)
+end
+
+
 ############################################################
 ### FIT PROBIT
 ############################################################
@@ -243,17 +325,6 @@ function fit_probit(
     formula, formula_fes = Regress.parse_fe(formula)
     fes, feids, fekeys = Regress.parse_fixedeffect(data, formula_fes)
 
-    ## Instantiate response object
-    rrr = BinaryResponse{Float64}(
-        y,
-        Normal(0,1),
-        similar(y),
-        similar(y),
-        similar(y),
-        similar(y),
-        response_name
-    )
-
     ## Instantiate predictor object
     pp = BinaryPredictorQR{Float64,Weights}(
             X,similar(X),
@@ -262,13 +333,27 @@ function fit_probit(
             similar(X),similar(y), similar(y)
         )
 
-    #Initialize variables
-    eta = pp.X * pp.beta
-    v = log_likelihood_probit.(y,eta)
-    total_log_likelihood = sum(getindex.(v,3)) 
-    deviance = -2 * total_log_likelihood
-    basis_coef_mask = trues(length(beta0))
+
+    ## Instantiate response object
+    rr = buildBinaryResponse(y,pp,response_name)
+    
     beta = copy(pp.beta)
+
+    m = BinaryEstimator{Float64}(
+            rr,
+            pp,
+            formula,
+            formula_schema,
+            size(data,1),
+            0,
+            0.0,
+            tss,
+            true,
+            0,
+            coef_names_str,
+            trues(length(coef_names_str))
+        )
+    
 
     ###############################################
     ############ ESTIMATION LOOP ##################
@@ -276,49 +361,11 @@ function fit_probit(
     i = 0
     for _ in 1:max_iter
         println(i)
-        X̃, X = pp.tildaX, pp.X
-        z̃, z = pp.tildaz,pp.z
-        copyto!(X̃,X)
-        #compute the score (gi) and Hessian (hi) of the likelihood wrt eta
-        gi = getindex.(v, 1)
-        hi = getindex.(v, 2)
-        
-        # compute working response 
-        z̃ .= eta .+ (gi./hi) 
-        copyto!(z,z̃)
-        
-        # create a vector of vectors with zi and then all the columns of X, to then pass it to partialout
-        # this will be modified in place
-        cols = Vector{AbstractVector{Float64}}(collect(eachcol(X̃))) #this is a view so it does not allocate
-        pushfirst!(cols, z̃) 
 
-        feM, _,_,_,_,_ = Regress.partial_out_fixed_effects!(
-            cols,
-            coef_names_str,
-            fes,
-            Weights(hi),
-            :cpu, # TODO make this an argument,
-            Threads.nthreads(),
-            1e-6,
-            10000,
-            true,
-            false,
-            true, 
-            true, 
-            Float64
-        ) # this modifies X and z in place
-
-        wls = ils_solver(
-                X̃,
-                z̃,
-                weights= hi
-            )
-
-        betanew = Regress.coef(wls)
-
+        feM = update_predictor!(m,fes)
 
         newfes, _ , _ = Regress.solve_coefficients!(
-            z - X * betanew,
+            pp.z - pp.X * pp.beta_new,
             feM;
             tol = 1e-6,
             maxiter = 1000
@@ -327,29 +374,15 @@ function fit_probit(
 
         # Compute eta(t) = X * beta + alpha(t) using current iteration alpha but original X
         alpha_sum = alpha isa AbstractVector ? alpha : vec(sum(alpha, dims = 2))
-        eta = X * betanew .+ alpha_sum
-
-        v = log_likelihood_probit.(y,eta)
-        total_log_likelihood = sum(getindex.(v,3))
-        deviance_new = -2 * total_log_likelihood
-
-        # step halving
-        steps = 0
-        while deviance < deviance_new && steps < 26
-            betanew = (beta .+ betanew) ./2
-            eta = X * betanew .+ alpha_sum
-            v = log_likelihood_probit.(y,eta)
-            total_log_likelihood = sum(getindex.(v,3))
-            deviance_new = -2 * total_log_likelihood
-            steps += 1
-        end
         
-        if norm(deviance_new - deviance) / (0.1 + norm(deviance_new))  < tolerance
-            beta = betanew
+       update_response!(m,alpha_sum)
+        
+        if norm(rr.deviance_new - rr.deviance) / (0.1 + norm(rr.deviance_new))  < tolerance
+            pp.beta = pp.beta_new
             break
         end
-        deviance = deviance_new
-        pp.beta = betanew
+        rr.deviance = rr.deviance_new
+        pp.beta = pp.beta_new
         i += 1
     end
 
@@ -357,36 +390,7 @@ function fit_probit(
     ## Summary statistics
     ################################
 
-    fitted_probabilities = normcdf.(eta)
+    fitted_probabilities = normcdf.(rr.eta)
 
-
-
-    ################################
-    ## Construct Return Objects
-    ################################
-
-    rr = BinaryResponse{Float64}(
-        convert(Vector{Float64}, y),
-        Normal(0,1),
-        Vector{Float64}(),
-        fitted_probabilities,
-        Vector{Float64}(),
-        Vector{Float64}(),
-        response_name
-    )
-    estimator = BinaryEstimator{Float64}(
-        rr,
-        pp,
-        formula,
-        formula_schema,
-        size(data,1),
-        0,
-        0.0,
-        tss,
-        true,
-        0,
-        coef_names_str,
-        trues(length(coef_names_str))
-    )
-    return estimator
+    return m
 end
