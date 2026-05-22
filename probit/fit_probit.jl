@@ -252,7 +252,8 @@ function update_predictor!(m::BinaryEstimator,fes)
             false,
             true, 
             true, 
-            Float64
+            Float64,
+            false
         ) # this modifies X and z in place
 
         wls = ils_solver(
@@ -397,8 +398,6 @@ function fit_probit(
     ###############################################
     i = 0
     for _ in 1:max_iter
-        println(i)
-
         feM = update_predictor!(m,fes)
 
         newfes, _ , _ = Regress.solve_coefficients!(
@@ -428,6 +427,6 @@ function fit_probit(
     ################################
 
     fitted_probabilities = normcdf.(rr.eta)
-
+    println("Convergence reached after $i iterations")
     return m
 end
