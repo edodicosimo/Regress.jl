@@ -6,7 +6,7 @@ using DataFrames
 using BenchmarkTools
 
 # Load a dataset
-rwm_data = CSV.read("/Users/edoardodicosimo/Downloads/rwm.data", DataFrame, header=false, delim=' ', ignorerepeated=true)
+rwm_data = CSV.read(joinpath(@__DIR__, "data/rwm.data"), DataFrame, header=false, delim=' ', ignorerepeated=true)
 
 rename!(rwm_data, [
     :id, :female, :year, :age, :hsat, :handdum, :handper, 
@@ -19,7 +19,7 @@ rename!(rwm_data, [
 rwm_data[!, :visit_dummy] = ifelse.(rwm_data.docvis .> 0, 1, 0)
            
 
-m = probit(
+@time m = probit(
     rwm_data,
     @formula(visit_dummy ~ age + hhninc + hhkids + educ + married + fe(id) + fe(year));
     beta0=[0,0,0,0,0],
