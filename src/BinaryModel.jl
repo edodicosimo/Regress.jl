@@ -1,7 +1,7 @@
-using Regress
-using Regress: AbstractRegressModel
-using StatsAPI
-using StatsBase
+import StatsAPI: coef, coefnames, coeftable, confint, deviance,
+                 dof, dof_residual, fitted, loglikelihood,
+                 modelmatrix, nobs, nulldeviance, nullloglikelihood,
+                 predict, residuals, response, responsename
 using Printf: @sprintf
 
 # ── Response ─────────────────────────────────────────────────────────────────
@@ -105,15 +105,15 @@ end
 # ── ILS inner model ───────────────────────────────────────────────────────────
 
 """
-    ILSEstimator{T <: AbstractFloat, P <: Regress.OLSLinearPredictor{T}}
+    ILSEstimator{T <: AbstractFloat, P <: OLSLinearPredictor{T}}
 
 Iterated Least Squares sub-model wrapping an OLS response and predictor.
 Used as the inner linear step of IRLS binary model fitting.
 `basis_coef` marks which columns are linearly independent.
 """
-struct ILSEstimator{T <: AbstractFloat, P <: Regress.OLSLinearPredictor{T}} <:
+struct ILSEstimator{T <: AbstractFloat, P <: OLSLinearPredictor{T}} <:
        AbstractRegressModel
-    rr::Regress.OLSResponse{T}
+    rr::OLSResponse{T}
     pp::P
     basis_coef::BitVector
 end
@@ -157,7 +157,7 @@ mutable struct BinaryEstimator{T <: AbstractFloat} <: AbstractRegressModel
 end
 
 has_iv(::BinaryEstimator) = false
-has_fe(m::BinaryEstimator) = Regress.has_fe(m.formula_fes)
+has_fe(m::BinaryEstimator) = has_fe(m.formula_fes)
 
 basis_coef(m::BinaryEstimator) = m.basis_coef
 
@@ -190,7 +190,7 @@ function StatsAPI.modelmatrix(m::BinaryEstimator)
     m.pp.X
 end
 
-function coeftable(m::BinaryEstimator)
+function StatsAPI.coeftable(m::BinaryEstimator)
     CoefTable(
         [coef(m)],
         ["Estimate"],

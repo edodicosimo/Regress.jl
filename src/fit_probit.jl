@@ -1,13 +1,3 @@
-using Distributions
-using DataFrames
-import Regress
-using Regress: fe
-using StatsModels
-using StatsFuns
-using LinearAlgebra
-using Base.Threads
-include("BinaryModel.jl")
-
 #######################################
 ### HELPER FUNCTION TO CLEAN DATA
 #######################################
@@ -155,11 +145,11 @@ function ils_solver(X::AbstractMatrix{<:Real}, y::AbstractVector{<:Real};
 
     # Build response object
     mu = similar(y_vec)
-    rr = Regress.OLSResponse(y_vec, mu, wts_vec, T[], :y)
+    rr = OLSResponse(y_vec, mu, wts_vec, T[], :y)
 
     # Fit using unified solver
     pp, basis_coef,
-    _ = Regress.fit_ols_core!(rr, X_mat, factorization;
+    _ = fit_ols_core!(rr, X_mat, factorization;
         tol = tol, save_matrices = true, collinearity = collinearity)
 
 
@@ -209,7 +199,7 @@ function update_predictor!(m::BinaryEstimator,fes)
         copyto!(pp.z,pp.tildaz) #dest,source
         cols = Vector{AbstractVector{Float64}}(collect(eachcol(pp.tildaX))) #this is a view so it does not allocate
         pushfirst!(cols, pp.tildaz) 
-        feM, _,_,_,_,_ = Regress.partial_out_fixed_effects!(
+        feM, _,_,_,_,_ = partial_out_fixed_effects!(
                         cols,
             m.coefnames,
             fes,
@@ -231,7 +221,7 @@ function update_predictor!(m::BinaryEstimator,fes)
             pp.tildaz,
             weights= hi
         )
-        pp.beta_new = Regress.coef(wls)
+        pp.beta_new = coef(wls)
         m.basis_coef = basis_coef(wls)
         return feM
 end
@@ -336,8 +326,8 @@ function fit_probit(
 
 
     # formula parsing
-    formula, formula_fes = Regress.parse_fe(formula)
-    fes, feids, fekeys = Regress.parse_fixedeffect(data, formula_fes)
+    formula, formula_fes = parse_fe(formula)
+    fes, feids, fekeys = parse_fixedeffect(data, formula_fes)
 
 
     ## Instantiate predictor object
@@ -364,7 +354,7 @@ function fit_probit(
             0,                              # n_parameters
             0,                              # deviance
             nulldeviance,                   # nulldeviance
-            Regress.has_fe(formula_fes),    # has_fixed_effects
+            has_fe(formula_fes),            # has_fixed_effects
             0,                              # fixed_effects_dof
             coef_names_str,                 # coefnames
             trues(length(coef_names_str))   # basis_coef
@@ -381,7 +371,7 @@ function fit_probit(
         feM = update_predictor!(m,fes)
 
         if m.has_fixed_effects
-            newfes, _ , _ = Regress.solve_coefficients!(
+            newfes, _ , _ = solve_coefficients!(
                 pp.z - pp.X * pp.beta_new,
                 feM;
                 tol = 1e-6,
@@ -409,7 +399,7 @@ function fit_probit(
     ## Summary statistics
     ################################
 
-    ngroups_fes = [Regress.nunique(fe) for fe in fes]
+    ngroups_fes = [nunique(fe) for fe in fes]
     dof_fes = sum(ngroups_fes)
     dof_model = sum(basis_coef(m))
     m.n_parameters = dof_model
