@@ -190,10 +190,6 @@ function log_likelihood_probit(y,eta)
     return (gi, hi,di)
 end
 
-
-
-
-
 """
     update_predictor!(m::BinaryEstimator, fes) -> feM
 
@@ -236,6 +232,7 @@ function update_predictor!(m::BinaryEstimator,fes)
             weights= hi
         )
         pp.beta_new = Regress.coef(wls)
+        m.basis_coef = basis_coef(wls)
         return feM
 end
 
@@ -331,12 +328,17 @@ function fit_probit(
     # vector to store fitted values, now empty
     fitted_probabilities = Vector{Float64}()
 
+    n = size(data,1)  
+    k = count(==(1),y) 
     # total sum of squares
-    tss = sum((y .- mean(y)).^2)
+    Lnull = k * log(k/n) + (n-k) * log(1 - k/n)
+    nulldeviance = -2 * Lnull
+
 
     # formula parsing
     formula, formula_fes = Regress.parse_fe(formula)
     fes, feids, fekeys = Regress.parse_fixedeffect(data, formula_fes)
+
 
     ## Instantiate predictor object
     pp = BinaryPredictorQR{Float64,Weights}(
@@ -353,19 +355,22 @@ function fit_probit(
     beta = copy(pp.beta)
 
     m = BinaryEstimator{Float64}(
-            rr,
-            pp,
-            formula,
-            formula_schema,
-            size(data,1),
-            0,
-            0.0,
-            tss,
-            Regress.has_fe(formula_fes),
-            0,
-            coef_names_str,
-            trues(length(coef_names_str))
+            rr,                             # rr
+            pp,                             # pp
+            formula,                        # formula
+            formula_schema,                 # formula_schema
+            formula_fes,                    # formula_fes
+            size(data,1),                   # n_observations
+            0,                              # n_parameters
+            0,                              # deviance
+            nulldeviance,                   # nulldeviance
+            Regress.has_fe(formula_fes),    # has_fixed_effects
+            0,                              # fixed_effects_dof
+            coef_names_str,                 # coefnames
+            trues(length(coef_names_str))   # basis_coef
         )
+        m.deviance = deviance(m)
+    
     
 
     ###############################################
@@ -403,6 +408,12 @@ function fit_probit(
     ################################
     ## Summary statistics
     ################################
+
+    ngroups_fes = [Regress.nunique(fe) for fe in fes]
+    dof_fes = sum(ngroups_fes)
+    dof_model = sum(basis_coef(m))
+    m.n_parameters = dof_model
+    m.fixed_effects_dof = dof_fes
 
     rr.mu = normcdf.(rr.eta) #FIXME need to also use alpha??
     println("Convergence reached after $i iterations")
