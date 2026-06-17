@@ -33,7 +33,7 @@ function select_columns(df::DataFrame, formula::FormulaTerm)
     for (j,name) in enumerate(Xnames)
         out[!, name] = X[:, j]
     end
-    X_final = X_final = convert(Matrix{Float64}, X_without_fe) #FIXME it is always float here
+    X_final = convert(Matrix{Float64}, X_without_fe) #FIXME it is always float here
     return (schema, formula_schema,out, X_final, vec(y))
     
 end
