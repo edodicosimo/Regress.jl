@@ -298,7 +298,7 @@ the slope coefficients.
 function fit_probit(
     @nospecialize(data),
     formula::FormulaTerm,
-    beta0::Vector,
+    beta0::Union{Nothing, Vector},
     max_iter::Integer,
     tolerance::Real #if the difference between the old beta and the new one is below the tolerance stop 
 )
@@ -306,9 +306,15 @@ function fit_probit(
     ###### FORMULA PARSING AND DATA CLEANING ######
     ###############################################
 
+
+
     #parse the formula and return a dataframe with only the needed columns, X::Matrix, y::Vector.
     schema, formula_schema, data, X, y = select_columns(data, formula)
-
+    
+    # Put all 0s in beta if user did not input an initial guess
+    if beta0 === nothing
+        beta0 = zeros(size(X, 2))
+    end
     # store coefficient names for model summary, ignroes fe variables
     response_name, coef_names_str = get_coefficient_names_nofe(formula, data)
 
