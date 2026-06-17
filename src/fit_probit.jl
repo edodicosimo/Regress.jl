@@ -17,9 +17,9 @@ function select_columns(df::DataFrame, formula::FormulaTerm)
     formula = ignore_fe(formula)
     
     y = modelcols(formula.lhs,df)
-    X = modelcols(formula.rhs,df)
+    X = modelcols(MatrixTerm(formula.rhs),df)
     
-    X_without_fe = modelcols(formula_without_fe.rhs,df)
+    X_without_fe = modelcols(MatrixTerm(formula_without_fe.rhs),df)
 
     schema = StatsModels.schema(formula, df)
     formula_schema = apply_schema(formula,schema)
@@ -31,9 +31,10 @@ function select_columns(df::DataFrame, formula::FormulaTerm)
 
     out[!, response_name] = vec(y)
     for (j,name) in enumerate(Xnames)
-        out[!, name] = X[j]
+        out[!, name] = X[:, j]
     end
-    return (schema, formula_schema,out, reduce(hcat,X_without_fe), vec(y))
+    X_final = X_final = convert(Matrix{Float64}, X_without_fe) #FIXME it is always float here
+    return (schema, formula_schema,out, X_final, vec(y))
     
 end
 
@@ -43,7 +44,13 @@ end
 Return a formula where each `fe(x)` term is converted to the ordinary term `x`.
 """
 function ignore_fe(f::FormulaTerm)
-    rhs_terms = f.rhs isa Tuple ? collect(f.rhs) : collect(f.rhs.terms)
+    rhs_terms = if hasproperty(f.rhs,:terms)
+        f.rhs.terms
+    elseif f.rhs isa Tuple
+        f.rhs
+    else
+        (f.rhs,)
+    end
 
     new_rhs = map(rhs_terms) do t
         if t isa FunctionTerm{typeof(fe)}
@@ -62,7 +69,13 @@ end
 Return a formula with all `fe(...)` terms removed from the right-hand side.
 """
 function remove_fixedeffects(f::FormulaTerm)
-    rhs_terms = f.rhs isa Tuple ? collect(f.rhs) : collect(f.rhs.terms)
+    rhs_terms = if hasproperty(f.rhs,:terms)
+        f.rhs.terms
+    elseif f.rhs isa Tuple
+        f.rhs
+    else
+        (f.rhs,)
+    end
 
     new_rhs = filter(rhs_terms) do t
         !(t isa FunctionTerm{typeof(fe)})
@@ -100,7 +113,7 @@ This is a lightweight WLS solver for internal probit iterations, returning
 an `ILSEstimator` containing the response object, predictor object, and
 basis coefficient mask, without full inference results.
 """
-function ils_solver(X::AbstractMatrix{<:Real}, y::AbstractVector{<:Real};
+function ils_solver(X::AbstractVecOrMat{<:Real}, y::AbstractVector{<:Real};
         factorization::Symbol = :auto,
         collinearity::Symbol = :qr,
         tol::Real = 1e-8,

@@ -61,13 +61,13 @@ estimates, and demeaned working variables used in each IRLS step.
 - `z`, `tildaz`: working response and its demeaned version
 """
 mutable struct BinaryPredictorQR{T <: AbstractFloat, W <: AbstractWeights}
-    X::Matrix{T}
-    X_reduced::Matrix{T}  #FIXME Non collinear columns only
+    X::AbstractVecOrMat{T}
+    X_reduced::AbstractVecOrMat{T}  #FIXME Non collinear columns only
     beta::Vector{T}
     deltaBeta::Vector{T}
     beta_new::Vector{T}
     weights::W
-    tildaX::Matrix{T}
+    tildaX::AbstractVecOrMat{T}
     z::Vector{T}
     tildaz::Vector{T}
     # qr::LinearAlgebra.QRCompactWY{T, Matrix{T}} #TODO add QR factorization
@@ -83,7 +83,7 @@ log-likelihood contributions, and deviance.
 function BinaryResponse(yi,pp::BinaryPredictorQR,responsename)
     T = eltype(pp.beta)
     yi = T.(yi)
-    eta = pp.X * pp.beta
+    eta = pp.X isa AbstractVector ? pp.X * only(pp.beta) : pp.X * pp.beta
     v = log_likelihood_probit.(yi,eta)
     total_log_likelihood = sum(getindex.(v,3)) 
     deviance = -2 * total_log_likelihood

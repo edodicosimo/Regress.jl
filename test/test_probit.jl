@@ -26,5 +26,31 @@ m = probit(
     max_iter=1000,
     tolerance=1e-6
 )
+println(m)
 
+n = probit(
+    rwm_data,
+    @formula(visit_dummy ~ age + hhninc + hhkids + educ + married + fe(id));
+    beta0 = nothing,
+    max_iter=1000,
+    tolerance=1e-6
+)
+println(n)
 
+o = probit(
+    rwm_data,
+    @formula(visit_dummy ~ age + hhninc + hhkids + educ + married);
+    beta0 = nothing,
+    max_iter=1000,
+    tolerance=1e-6
+)
+println(o)
+
+p = probit(
+    rwm_data,
+    @formula(visit_dummy ~ educ);
+    beta0 = nothing,
+    max_iter=1000,
+    tolerance=1e-6
+)
+println(p)
