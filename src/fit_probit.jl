@@ -441,3 +441,48 @@ function update_response!(m, alpha)
     rr.deviance_new = refresh_response!(rr, pp.X, pp.beta_new, alpha)
     stephalving!(m, alpha)
 end
+
+
+
+
+
+
+"""
+    inverse_link_probit(eta) -> (mu, one_minus_mu, dmu_deta)
+Evaluate the probit inverse link at the scalar linear predictor `eta`.
+Return `mu = Φ(eta)`, `one_minus_mu = 1 - Φ(eta)`, and the derivative
+`dmu_deta = φ(eta)`, where `Φ` and `φ` are the standard normal CDF and PDF.
+The complementary probability is computed directly with `ccdf` to avoid
+cancellation when `mu` is close to one.
+"""
+function inverse_link_probit(eta)
+    mu = cdf(Normal(), eta)
+    one_minus_mu = ccdf(Normal(), eta)
+    dmu_deta = pdf(Normal(), eta)
+    return mu, one_minus_mu, dmu_deta
+end
+
+  
+
+"""
+    link_probit(mu) -> eta
+Evaluate the probit link `eta = Φ⁻¹(mu)` for a scalar probability `mu` in
+`[0, 1]`, where `Φ` is the standard normal CDF. The endpoints `0` and `1`
+map to `-Inf` and `Inf`, respectively.
+"""
+function link_probit(mu)
+    return quantile(Normal(), mu)
+end
+
+  
+
+"""
+    var_bernoulli(mu, one_minus_mu) -> variance
+Return the Bernoulli variance `mu * one_minus_mu`, where `mu` is the success
+probability and `one_minus_mu` is its complement. Accepting the complement
+separately allows callers to supply a value computed with `ccdf`, avoiding
+cancellation from subtracting `mu` from one.
+"""
+function var_bernoulli(mu, one_minus_mu)
+    return mu * one_minus_mu
+end
