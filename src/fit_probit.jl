@@ -121,6 +121,31 @@ function log_likelihood_probit(y, eta)
 end
 
 ############################################################
+### IRLS workspace for Fisher Scoring
+############################################################
+struct ProbitWorkspaceForFS{T <: AbstractFloat, C <: AbstractVector{T}}
+    g::Vector{T}       # response residual y - mu
+    d::Vector{T}       # inverse-link derivative dmu_deta
+    h::Vector{T}       # Fisher weights dmu_deta^2 / Var(y)
+    z::Vector{T}       # working response η + g/d
+    M::Matrix{T}       # [working response | design], absorbed in place
+    cols::Vector{C}    # views into M's columns for solve_residuals!
+    resid::Vector{T}   # z - Xβ, input to the fixed-effect contribution recovery
+end
+
+function ProbitWorkspaceForFS(X::Matrix{T}) where {T <: AbstractFloat}
+    n, k = size(X)
+    M = Matrix{T}(undef, n, k + 1)
+    C = typeof(view(M, :, 1))
+    cols = C[view(M, :, j) for j in 1:(k + 1)]
+    return ProbitWorkspaceForFS{T, C}(
+        Vector{T}(undef, n), Vector{T}(undef, n), Vector{T}(undef, n), Vector{T}(undef, n),
+        M, cols, Vector{T}(undef, n))
+end
+
+
+
+############################################################
 ### IRLS workspace
 ############################################################
 """
@@ -155,8 +180,8 @@ function ProbitWorkspace(X::Matrix{T}) where {T <: AbstractFloat}
 end
 
 # Views onto the working response and the absorbed design within the shared buffer.
-zbuf(ws::ProbitWorkspace) = view(ws.M, :, 1)
-Xdbuf(ws::ProbitWorkspace) = view(ws.M, :, 2:size(ws.M, 2))
+zbuf(ws::Union{ProbitWorkspace, ProbitWorkspaceForFS}) = view(ws.M, :, 1)
+Xdbuf(ws::Union{ProbitWorkspace, ProbitWorkspaceForFS}) = view(ws.M, :, 2:size(ws.M, 2))
 
 ############################################################
 ### Weighted least squares on the absorbed design
@@ -200,7 +225,7 @@ slope columns that survive fixed-effect absorption.
 A separate function from `fit_probit` so the hot loop specializes on the
 concrete types of `ws` and `feM`.
 """
-function _probit_irls!(m::BinaryEstimator, ws::ProbitWorkspace, feM, has_fes::Bool,
+function _probit_irls!(m::BinaryEstimator, ws::ProbitWorkspaceForFS, feM, has_fes::Bool,
         max_iter::Integer, tolerance::Real)
     rr = m.rr
     pp = m.pp
@@ -217,15 +242,17 @@ function _probit_irls!(m::BinaryEstimator, ws::ProbitWorkspace, feM, has_fes::Bo
     Xd = Xdbuf(ws)
 
     for _ in 1:max_iter
-        # Score and observed information from the current linear predictor.
+        # Residuals, inverse-link derivatives, and Fisher weights at the current eta.
         @inbounds for i in eachindex(rr.v)
-            gi, hi, _ = rr.v[i]
+            gi, di, _ = rr.v[i]
+            mu, one_minus_mu, _ = inverse_link_probit(rr.eta[i])
             ws.g[i] = gi
-            ws.h[i] = hi
+            ws.d[i] = di
+            ws.h[i] = di^2 / var_bernoulli(mu, one_minus_mu)
         end
 
         # Working response, and the absorption buffer holding [z | X].
-        ws.z .= rr.eta .+ ws.g ./ ws.h
+        ws.z .= rr.eta .+ ws.g ./ ws.d
         zd .= ws.z
         copyto!(Xd, pp.X)
 
@@ -292,8 +319,9 @@ end
 Estimate a binary-response probit model, optionally absorbing fixed effects
 specified with `fe(...)` terms in `formula`.
 
-The estimator uses iteratively reweighted least squares. Each iteration forms
-the working response and weights from the probit score and observed information,
+The estimator uses Fisher scoring via iteratively reweighted least squares.
+Each iteration forms the working response and weights from the response residual,
+inverse-link derivative, and Bernoulli variance,
 absorbs the fixed effects from both the working response and the design, solves
 the weighted least-squares update for the slope coefficients, and recovers the
 fixed-effect contribution to the linear predictor. Step-halving guards against
@@ -371,7 +399,7 @@ function fit_probit(
     ###############################################
     ############ ESTIMATION LOOP ##################
     ###############################################
-    ws = ProbitWorkspace(X)
+    ws = ProbitWorkspaceForFS(X)
     # Build the fixed-effect solver once; only its weights change per iteration.
     feM = has_fes ?
           AbstractFixedEffectSolver{Float64}(fes, Weights(ones(n)), Val{:cpu}) : nothing
@@ -402,12 +430,17 @@ function refresh_response!(rr::BinaryResponse{T}, X, beta, alpha) where {T}
     dev = zero(T)
     @inbounds for i in eachindex(rr.eta)
         rr.eta[i] += alpha[i]
-        gi, hi, di = log_likelihood_probit(rr.y[i], rr.eta[i])
-        rr.v[i] = (gi, hi, di)
-        dev -= 2 * di
+        mu, one_minus_mu, dmu_deta = inverse_link_probit(rr.eta[i])
+        gi = rr.y[i] .- mu
+        di = dmu_deta
+        devi = deviance_bernoulli(rr.y[i],mu,one_minus_mu)
+        rr.v[i] = (gi, di, devi)
+        dev += devi
     end
     return dev
 end
+
+
 
 """
     stephalving!(m::BinaryEstimator, alpha)
@@ -443,10 +476,6 @@ function update_response!(m, alpha)
 end
 
 
-
-
-
-
 """
     inverse_link_probit(eta) -> (mu, one_minus_mu, dmu_deta)
 Evaluate the probit inverse link at the scalar linear predictor `eta`.
@@ -456,13 +485,12 @@ The complementary probability is computed directly with `ccdf` to avoid
 cancellation when `mu` is close to one.
 """
 function inverse_link_probit(eta)
-    mu = cdf(Normal(), eta)
-    one_minus_mu = ccdf(Normal(), eta)
-    dmu_deta = pdf(Normal(), eta)
+    mu = normcdf(eta)
+    one_minus_mu = StatsFuns.normccdf(eta)
+    dmu_deta = exp(normlogpdf(eta))
     return mu, one_minus_mu, dmu_deta
 end
 
-  
 
 """
     link_probit(mu) -> eta
@@ -474,7 +502,6 @@ function link_probit(mu)
     return quantile(Normal(), mu)
 end
 
-  
 
 """
     var_bernoulli(mu, one_minus_mu) -> variance
@@ -485,4 +512,26 @@ cancellation from subtracting `mu` from one.
 """
 function var_bernoulli(mu, one_minus_mu)
     return mu * one_minus_mu
+end
+
+"""
+    deviance_bernoulli(y, mu, one_minus_mu) -> deviance
+
+Return the deviance contribution of one Bernoulli observation `y` (zero or
+one), given its success probability `mu` and complement `one_minus_mu`.
+The contribution is `-2 * log(mu)` when `y == 1` and
+`-2 * log(one_minus_mu)` when `y == 0`. Sum the contributions to obtain
+the total deviance.
+
+Accepting the complement separately allows callers to supply a value computed
+with `ccdf`. Branching on `y` avoids `0 * log(0)` at probability endpoints;
+an observation assigned zero probability has infinite deviance.
+"""
+function deviance_bernoulli(y, mu, one_minus_mu)
+    if y == 1
+        return -2 * log(mu)
+    elseif y == 0
+        return -2 * log(one_minus_mu)
+    end
+    throw(DomainError(y, "Bernoulli response must be zero or one"))
 end

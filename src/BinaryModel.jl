@@ -10,11 +10,11 @@ using Printf: @sprintf
     BinaryResponse{T <: AbstractFloat}
 
 Working storage for binary model response. Holds observed data, fitted values,
-and per-observation scores/hessians/log-likelihoods updated at each IRLS iteration.
+and per-observation residuals, inverse-link derivatives, and deviance contributions.
 
 # Fields
 - `y`: observed binary response vector
-- `v`: per-observation `(score, hessian, log-likelihood)` tuples
+- `v`: per-observation `(y - mu, dmu_deta, deviance)` tuples
 - `deviance`, `deviance_new`: current and candidate deviance (convergence check)
 - `eta`: linear predictor 
 - `mu`: fitted probabilities (inverse-link of η)
@@ -35,8 +35,7 @@ mutable struct BinaryResponse{T <: AbstractFloat}
 end
 
 function StatsAPI.deviance(rr::BinaryResponse)
-    total_log_likelihood = sum(getindex.(rr.v, 3))
-    return -2 * total_log_likelihood
+    return sum(t -> t[3], rr.v)
 end
 
 # ── Predictor ─────────────────────────────────────────────────────────────────
@@ -63,22 +62,28 @@ end
 
 Construct a `BinaryResponse` from initial response vector `yi`, predictor `pp`,
 and the response variable name. Computes the initial linear predictor `eta`,
-log-likelihood contributions, and deviance.
+fitted probabilities, residuals, inverse-link derivatives, and deviance.
 """
 function BinaryResponse(yi, pp::BinaryPredictorQR, responsename)
     T = eltype(pp.beta)
     yi = T.(yi)
     eta = pp.X * pp.beta
-    v = log_likelihood_probit.(yi, eta)
-    total_log_likelihood = sum(getindex.(v, 3))
-    deviance = -2 * total_log_likelihood
+    mu = similar(yi)
+    v = Vector{Tuple{T, T, T}}(undef, length(yi))
+    for i in eachindex(yi)
+        mui, one_minus_mu, dmu_deta = inverse_link_probit(eta[i])
+        mu[i] = mui
+        v[i] = (yi[i] - mui, dmu_deta,
+            deviance_bernoulli(yi[i], mui, one_minus_mu))
+    end
+    deviance = sum(t -> t[3], v)
     return BinaryResponse(
         yi,
         v,
         deviance,
         0.0,
         eta,
-        similar(yi), # fitted probabilities
+        mu, # fitted probabilities
         similar(yi), # weights
         similar(yi), # offset
         responsename
@@ -198,8 +203,7 @@ function Base.show(io::IO, ::MIME"text/plain", m::BinaryEstimator)
 end
 
 function StatsAPI.deviance(m::BinaryEstimator)
-    total_log_likelihood = sum(getindex.(m.rr.v, 3))
-    return -2 * total_log_likelihood
+    return deviance(m.rr)
 end
 
 StatsAPI.loglikelihood(m::BinaryEstimator) = -deviance(m) / 2
