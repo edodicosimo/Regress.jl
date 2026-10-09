@@ -18,17 +18,25 @@ and per-observation residuals, inverse-link derivatives, and deviance contributi
 - `deviance`, `deviance_new`: current and candidate deviance (convergence check)
 - `eta`: linear predictor 
 - `mu`: fitted probabilities (inverse-link of η)
+- `dmu_deta`: inverse-link derivatives
+- `resid`: response residuals `y - mu`
+- `deviance_contributions`: per-observation deviance contributions
 - `wts`: observation weights
 - `offset`: optional offset vector (empty = no offset)
 - `response_name`: symbol name of the response variable
 """
 mutable struct BinaryResponse{T <: AbstractFloat}
+    # model::Union(Link(),Distribution())
     y::Vector{T}
     v::Vector{Tuple{T, T, T}}
     deviance::T
     deviance_new::T
     eta::Vector{T}
     mu::Vector{T}
+    one_minus_mu::Vector{T}
+    dmu_deta::Vector{T}
+    resid::Vector{T}
+    deviance_contributions::Vector{T}
     wts::Vector{T}
     offset::Vector{T}
     response_name::Symbol
@@ -70,24 +78,27 @@ function BinaryResponse(yi, pp::BinaryPredictorQR, responsename)
     eta = pp.X * pp.beta
     mu = similar(yi)
     v = Vector{Tuple{T, T, T}}(undef, length(yi))
-    for i in eachindex(yi)
-        mui, one_minus_mu, dmu_deta = inverse_link_probit(eta[i])
-        mu[i] = mui
-        v[i] = (yi[i] - mui, dmu_deta,
-            deviance_bernoulli(yi[i], mui, one_minus_mu))
-    end
-    deviance = sum(t -> t[3], v)
-    return BinaryResponse(
+    rr = BinaryResponse(
         yi,
         v,
-        deviance,
-        0.0,
+        zero(T),
+        zero(T),
         eta,
         mu, # fitted probabilities
+        similar(yi), # one_minus_mu
+        similar(yi), # dmu_deta
+        similar(yi), # resid
+        similar(yi), # deviance_contributions
         similar(yi), # weights
         similar(yi), # offset
         responsename
     )
+    inverse_link_probit!(rr)
+    rr.resid .= rr.y .- rr.mu
+    rr.deviance_contributions .= deviance_bernoulli.(rr.y, rr.mu, rr.one_minus_mu)
+    rr.v .= tuple.(rr.resid, rr.dmu_deta, rr.deviance_contributions)
+    rr.deviance = sum(rr.deviance_contributions)
+    return rr
 end
 
 # ── Fitted model ──────────────────────────────────────────────────────────────

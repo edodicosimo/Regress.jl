@@ -99,28 +99,6 @@ function get_coefficient_names_nofe(formula::FormulaTerm, data::DataFrame)
 end
 
 ############################################################
-### Probit-specific likelihood helper
-############################################################
-"""
-    log_likelihood_probit(y, eta)
-
-Return the score, observed information, and log-likelihood contribution for a
-single probit observation with response `y` and linear predictor `eta`.
-"""
-function log_likelihood_probit(y, eta)
-    if y == 1
-        gi = exp(normlogpdf(eta) - normlogcdf(eta))
-        hi = gi^2 + eta * gi
-        di = normlogcdf(eta)
-    else
-        gi = -exp(normlogpdf(eta) - normlogccdf(eta))
-        hi = gi^2 + eta * gi
-        di = normlogccdf(eta)
-    end
-    return (gi, hi, di)
-end
-
-############################################################
 ### IRLS workspace for Fisher Scoring
 ############################################################
 struct ProbitWorkspaceForFS{T <: AbstractFloat, C <: AbstractVector{T}}
@@ -242,14 +220,11 @@ function _probit_irls!(m::BinaryEstimator, ws::ProbitWorkspaceForFS, feM, has_fe
     Xd = Xdbuf(ws)
 
     for _ in 1:max_iter
-        # Residuals, inverse-link derivatives, and Fisher weights at the current eta.
-        @inbounds for i in eachindex(rr.v)
-            gi, di, _ = rr.v[i]
-            mu, one_minus_mu, _ = inverse_link_probit(rr.eta[i])
-            ws.g[i] = gi
-            ws.d[i] = di
-            ws.h[i] = di^2 / var_bernoulli(mu, one_minus_mu)
-        end
+        inverse_link_probit!(rr)
+        rr.resid .= rr.y .- rr.mu
+        ws.g .= rr.resid
+        ws.d .= rr.dmu_deta
+        ws.h .= ws.d.^2 ./ (rr.mu .* rr.one_minus_mu)
 
         # Working response, and the absorption buffer holding [z | X].
         ws.z .= rr.eta .+ ws.g ./ ws.d
@@ -422,22 +397,17 @@ end
     refresh_response!(rr, X, beta, alpha) -> deviance
 
 Recompute the linear predictor `rr.eta = X·β + α` and the per-observation
-log-likelihood contributions `rr.v` in place, and return the deviance. Performs
+residuals, derivatives, and deviance contributions `rr.v` in place, and return the deviance. Performs
 no allocations beyond the reused buffers.
 """
 function refresh_response!(rr::BinaryResponse{T}, X, beta, alpha) where {T}
     mul!(rr.eta, X, beta)
-    dev = zero(T)
-    @inbounds for i in eachindex(rr.eta)
-        rr.eta[i] += alpha[i]
-        mu, one_minus_mu, dmu_deta = inverse_link_probit(rr.eta[i])
-        gi = rr.y[i] .- mu
-        di = dmu_deta
-        devi = deviance_bernoulli(rr.y[i],mu,one_minus_mu)
-        rr.v[i] = (gi, di, devi)
-        dev += devi
-    end
-    return dev
+    rr.eta .+= alpha
+    inverse_link_probit!(rr)
+    rr.resid .= rr.y .- rr.mu
+    rr.deviance_contributions .= deviance_bernoulli.(rr.y, rr.mu, rr.one_minus_mu)
+    rr.v .= tuple.(rr.resid, rr.dmu_deta, rr.deviance_contributions)
+    return sum(rr.deviance_contributions)
 end
 
 
@@ -465,7 +435,7 @@ end
 
 Update the response object after a predictor step. Recomputes `rr.eta` using
 `pp.beta_new` and the fixed-effect contribution `alpha`, refreshes the
-log-likelihood contributions `rr.v` and `rr.deviance_new`, then calls
+residuals, derivatives, and deviance contributions `rr.v` and `rr.deviance_new`, then calls
 `stephalving!` if needed to enforce a deviance decrease.
 """
 function update_response!(m, alpha)
@@ -477,17 +447,31 @@ end
 
 
 """
-    inverse_link_probit(eta) -> (mu, one_minus_mu, dmu_deta)
-Evaluate the probit inverse link at the scalar linear predictor `eta`.
-Return `mu = Φ(eta)`, `one_minus_mu = 1 - Φ(eta)`, and the derivative
-`dmu_deta = φ(eta)`, where `Φ` and `φ` are the standard normal CDF and PDF.
-The complementary probability is computed directly with `ccdf` to avoid
-cancellation when `mu` is close to one.
+    inverse_link_probit!(rr) -> rr
+
+Update `rr.mu`, `rr.one_minus_mu`, and `rr.dmu_deta` from `rr.eta` in place.
+Use the standard normal CDF, complementary CDF, and PDF, respectively.
+The complementary CDF avoids cancellation when `mu` is close to one.
 """
-function inverse_link_probit(eta)
-    mu = normcdf(eta)
-    one_minus_mu = StatsFuns.normccdf(eta)
-    dmu_deta = exp(normlogpdf(eta))
+function inverse_link_probit!(rr::BinaryResponse)
+    rr.mu .= normcdf.(rr.eta)
+    rr.one_minus_mu .= StatsFuns.normccdf.(rr.eta)
+    rr.dmu_deta .= exp.(normlogpdf.(rr.eta))
+    return rr
+end
+
+"""
+    inverse_link_logit(eta) -> (mu, one_minus_mu, dmu_deta)
+
+Evaluate the logit inverse link at the scalar linear predictor `eta`.
+Return `mu = 1 / (1 + exp(-eta))`, its complement, and the derivative
+`dmu_deta = mu * one_minus_mu`. Compute the complement as the logistic
+function at `-eta` to avoid cancellation when `mu` is close to one.
+"""
+function inverse_link_logit(eta)
+    mu = StatsFuns.logistic(eta)
+    one_minus_mu = StatsFuns.logistic(-eta)
+    dmu_deta = mu * one_minus_mu
     return mu, one_minus_mu, dmu_deta
 end
 
@@ -502,16 +486,26 @@ function link_probit(mu)
     return quantile(Normal(), mu)
 end
 
+"""
+    link_logit(mu) -> eta
+
+Evaluate the logit link `eta = log(mu / (1 - mu))` for a scalar probability
+`mu` in `[0, 1]`. The endpoints `0` and `1` map to `-Inf` and `Inf`,
+respectively. Use `log1p(-mu)` to evaluate the logarithm of the complement.
+"""
+function link_logit(mu)
+    return log(mu) - log1p(-mu)
+end
+
 
 """
-    var_bernoulli(mu, one_minus_mu) -> variance
-Return the Bernoulli variance `mu * one_minus_mu`, where `mu` is the success
-probability and `one_minus_mu` is its complement. Accepting the complement
-separately allows callers to supply a value computed with `ccdf`, avoiding
-cancellation from subtracting `mu` from one.
+    var_bernoulli(rr) -> variances
+
+Return a vector of Bernoulli variances `rr.mu .* rr.one_minus_mu`.
+The probability buffers must be updated before calling this function.
 """
-function var_bernoulli(mu, one_minus_mu)
-    return mu * one_minus_mu
+function var_bernoulli(rr::BinaryResponse)
+    return rr.mu .* rr.one_minus_mu
 end
 
 """
