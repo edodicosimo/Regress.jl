@@ -20,8 +20,10 @@
   models. The cache holds no leverage adjustments, so these returned CR1-type
   results.
 
-- **IV models fitted from matrices throw an `ArgumentError` for `vcov` and
-  `aVar` with `CR2` or `CR3`.** These returned CR0 results.
+- **`CR2` and `CR3` on IV models fitted from matrices give the leverage-adjusted
+  cluster variance of the formula fit**, for `vcov` and `aVar`. They returned CR0
+  results. Multiway `CR2` and `CR3` throw an `ArgumentError`, as on formula IV
+  models.
 
 - **One finite-sample factor per estimator, the same on OLS and IV models fitted
   from a formula or from matrices.** The table is in the `vcov` docstring.

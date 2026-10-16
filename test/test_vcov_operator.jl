@@ -786,21 +786,29 @@ end
         @test_throws "CachedCR on a Regress model supports CR0 and CR1" vcov(cached, model)
     end
 
-    # An IV model fitted from matrices has no leverage adjustment, so CR2 and CR3 throw.
+    # An IV model fitted from matrices gives the formula fit's cluster variances,
+    # exactly and over-identified.
     n = nrow(df)
-    model_iv_mat = Regress.iv(
-        TSLS(), [ones(n) df.Price df.NDI], [ones(n) df.Pimin df.NDI], df.Sales;
-        n_endogenous = 1)
-    @test all(isfinite, stderror(CM.CR0(df.State), model_iv_mat))
-    @test Matrix(aVar(CM.CR1(df.State), model_iv_mat)) ≈
-          Matrix(aVar(CM.CR0(df.State), model_iv_mat))
-    not_implemented = "is not implemented for IV models fitted from matrices"
-    @test all(isfinite, stderror(CM.CR1(df.State), model_iv_mat))
-    for K in (CM.CR2, CM.CR3)
-        @test_throws not_implemented vcov(K(df.State), model_iv_mat)
-    end
-    for K in (CM.CR2, CM.CR3)
-        @test_throws not_implemented aVar(K(df.State), model_iv_mat)
+    X = [ones(n) df.NDI df.Price]
+    for (f, Z) in ((@formula(Sales ~ NDI + (Price ~ Pimin)), [ones(n) df.NDI df.Pimin]),
+        (@formula(Sales ~ NDI + (Price ~ Pimin + Pop)), [ones(n) df.NDI df.Pimin df.Pop]))
+        iv_f = Regress.iv(TSLS(), df, f)
+        iv_m = Regress.iv(TSLS(), Z, X, df.Sales; n_endogenous = 1)
+        for K in (CM.CR0, CM.CR1, CM.CR2, CM.CR3)
+            @test Matrix(vcov(K(df.State), iv_m)) ≈ Matrix(vcov(K(df.State), iv_f)) rtol=1e-12
+            @test Matrix(aVar(K(df.State), iv_m)) ≈ Matrix(aVar(K(df.State), iv_f)) rtol=1e-12
+        end
+        @test issorted([stderror(K(df.State), iv_m)[3]
+                        for K in (CM.CR0, CM.CR1, CM.CR2, CM.CR3)])
+        for K in (CM.CR0, CM.CR1)
+            k = K((df.State, df.Year))
+            @test Matrix(vcov(k, iv_m)) ≈ Matrix(vcov(k, iv_f)) rtol=1e-12
+        end
+        for K in (CM.CR2, CM.CR3), m in (iv_f, iv_m)
+
+            @test_throws "multiway clustering with $(nameof(K)) is not supported for IV models" vcov(
+                K((df.State, df.Year)), m)
+        end
     end
 end
 

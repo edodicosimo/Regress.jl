@@ -1620,26 +1620,16 @@ end
 @noinline residualadjustment(k::_CM.CR0, m::IVMatrixEstimator) = 1.0
 @noinline residualadjustment(k::_CM.CR1, m::IVMatrixEstimator) = 1.0
 
-# A matrix-based IV model has no leverage-adjusted cluster residuals, so CR2/CR3 are
-# rejected rather than reported as CR0.
-_check_ivmatrix_cr(k, f) = nothing
-_check_ivmatrix_cr(k::_CM.CachedCR, f) = _check_ivmatrix_cr(_CM.estimator(k), f)
-_check_ivmatrix_cr(k::Union{_CM.CR2, _CM.CR3}, f) = _ivmatrix_cr_error(k, f)
-
-function _ivmatrix_cr_error(k, f)
-    throw(ArgumentError(
-        "$f with $(nameof(typeof(k))) is not implemented for IV models fitted from " *
-        "matrices; use CR0 or CR1, or fit the model with a formula."))
-end
-
+# `X_hat` holds the second-stage regressors (`Adj` for the K-class estimators), as on
+# the formula fit, so CR2/CR3 use the same leverage adjustment.
 function _regress_aVar(k::_CM.CR, m::IVMatrixEstimator; demean = false, prewhite = false,
         scale = true)
-    _check_ivmatrix_cr(k, aVar)
-    # Compute adjusted moment matrix: X̂ .* e
     X_hat = m.postestimation.X_hat
-    resid = m.postestimation.residuals
-    M = X_hat .* resid
-    return _moment_aVar(k, M; demean, prewhite, scale)
+    u = m.postestimation.residuals
+    if k isa Union{_CM.CR2, _CM.CR3}
+        u = _iv_cr_adjusted_residuals(k, X_hat, bread(m), u)
+    end
+    return _moment_aVar(k, X_hat .* u; demean, prewhite, scale)
 end
 
 function _regress_aVar(k, m::IVMatrixEstimator; demean = false, prewhite = false,
@@ -1665,8 +1655,6 @@ function _regress_vcov(ve, m::IVMatrixEstimator{T}; dofadjust = true, demean = f
         prewhite = false) where {T}
     n = nobs(m)
     B = bread(m)
-
-    _check_ivmatrix_cr(ve, vcov)
 
     A = _regress_aVar(ve, m; demean, prewhite)
     scale = T(n * _finite_sample_factor(ve, m, dofadjust))
