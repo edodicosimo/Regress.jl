@@ -659,6 +659,10 @@ end
 # Correlated estimators (HAC, EWC, DriscollKraay, VARHAC, etc.) - no residual adjustment needed
 @noinline residualadjustment(k::CM.Correlated, r::OLSModel) = 1.0
 
+# Any other estimator (the smoothers) on any Regress model uses CovarianceMatrices'
+# adjustment, which throws a `MethodError` for an estimator it does not know.
+@noinline residualadjustment(k, m) = CM.residual_adjustment(k, m)
+
 ##############################################################################
 ##
 ## Finite-sample factors
@@ -903,6 +907,46 @@ function _check_iid_keywords(demean, prewhite)
     return nothing
 end
 
+## The iid variance of `Uncorrelated()`: `σ² · B` with bread `B` and
+## `σ² = RSS / dof_residual(m)`. The residuals are those of the moment matrix, so RSS
+## is the weighted sum of squares for a weighted model.
+
+_iid_rss(m::OLSModel) = sum(abs2, CM.momentresiduals(m))
+_iid_rss(m::IVEstimator) = sum(abs2, residuals_for_vcov(m))
+_iid_rss(m::IVMatrixEstimator) = sum(abs2, m.postestimation.residuals)
+
+# The bread of an OLS model covers only the estimable coefficients; the variance has
+# a NaN row and column for each of the others, as in the sandwich `vcov`.
+function _iid_expand(V, m::OLSModel)
+    basis_coef = m.basis_coef
+    all(basis_coef) && return V
+    valid_idx = findall(basis_coef)
+    Σ = fill(eltype(V)(NaN), length(basis_coef), length(basis_coef))
+    Σ[valid_idx, valid_idx] = V
+    return Σ
+end
+_iid_expand(V, m) = V
+
+function _iid_vcov(k::CM.Uncorrelated, m; dofadjust = true, demean = false,
+        prewhite = false)
+    _check_iid_keywords(demean, prewhite)
+    σ² = _iid_rss(m) / (dofadjust ? dof_residual(m) : nobs(m))
+    B = CM.bread(m)
+    return _wrap_vcov(_iid_expand(Symmetric(σ² * B), m), k, nothing)
+end
+
+# `σ_n² · inv(B) / n` with `σ_n² = RSS / n` (without `/ n` for `scale = false`), so that
+# `n · B · aVar · B` is the iid variance with `dofadjust = false`. Like `B`, it covers
+# the estimable coefficients only.
+function _iid_aVar(k::CM.Uncorrelated, m; demean = false, prewhite = false,
+        scale = true)
+    _check_iid_keywords(demean, prewhite)
+    n = nobs(m)
+    σ_n² = _iid_rss(m) / n
+    A = σ_n² * inv(Symmetric(Matrix(CM.bread(m))))
+    return CovarianceMatrix(scale ? A / n : A, k, NamedTuple())
+end
+
 """
     vcov(k::AbstractAsymptoticVarianceEstimator, m; dofadjust = true, demean = false, prewhite = false)
     stderror(k::AbstractAsymptoticVarianceEstimator, m; kwargs...)
@@ -965,6 +1009,11 @@ function CM.vcov(k::CM.AbstractAsymptoticVarianceEstimator, m::RegressModel; kwa
     return _regress_vcov(_resolve_clusters(k, m), m; kwargs...)
 end
 
+function CM.vcov(k::CM.Uncorrelated, m::RegressModel; kwargs...)
+    _check_keywords(vcov, k, kwargs, _VCOV_KEYWORDS)
+    return _iid_vcov(k, m; kwargs...)
+end
+
 # `DriscollKraay` has its own method on a `RegressionModel` in CovarianceMatrices, which
 # explains that a `type` keyword belongs in the estimator.
 function CM.vcov(k::CM.DriscollKraay, m::RegressModel; kwargs...)
@@ -985,10 +1034,20 @@ Asymptotic variance (the meat of the sandwich) of the moment conditions of the R
 model `m`, computed with `k`. Clusters named by column are looked up as in `vcov`.
 `demean`, `prewhite` and `scale` have the meaning they have for `aVar` on a matrix; any
 other keyword throws an `ArgumentError`.
+
+For `Uncorrelated()` the result is `(RSS/n) · inv(B) / n` with bread `B` (without the
+`/ n` for `scale = false`), so that `n · B · aVar · B` is
+`vcov(Uncorrelated(), m; dofadjust = false)`. It covers the estimable coefficients only,
+as `B` does, and `demean` and `prewhite` throw an `ArgumentError`.
 """
 function CM.aVar(k::CM.AbstractAsymptoticVarianceEstimator, m::RegressModel; kwargs...)
     _check_keywords(aVar, k, kwargs, _AVAR_KEYWORDS)
     return _regress_aVar(_resolve_clusters(k, m), m; kwargs...)
+end
+
+function CM.aVar(k::CM.Uncorrelated, m::RegressModel; kwargs...)
+    _check_keywords(aVar, k, kwargs, _AVAR_KEYWORDS)
+    return _iid_aVar(k, m; kwargs...)
 end
 
 # CovarianceMatrices defines `aVar` methods on a `RegressionModel` for these two.

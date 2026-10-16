@@ -52,6 +52,15 @@
 
 ### Fixed
 
+- `UniformSmoother` and `TriangularSmoother` work on every model type, with the
+  `n/(n-K)` factor of the other long-run estimators. They threw a `MethodError`.
+
+- `vcov(Uncorrelated(), m)` on OLS models is the iid variance `σ² · (X'X)⁻¹` with
+  `σ² = RSS/dof_residual`, as on IV models; weighted fits use the weighted RSS, as
+  R `vcov(lm(...))` does. `aVar(Uncorrelated(), m)` works on every model type and
+  is the meat of that variance without the degrees-of-freedom factor. Both threw a
+  `MethodError` on OLS models, and `aVar` also on IV models.
+
 - `vcov` on Float32 models returns a Float32 matrix for every estimator.
   `HC1`–`HC5`, the cluster estimators and the HAC kernels returned Float64 on
   OLS or IV models.

@@ -859,7 +859,7 @@ end
         @test Matrix(vcov(CM.Bartlett(3), m; dofadjust = false)) ≈
               Matrix(vcov(CM.Bartlett(3), m)) .* (n - p) / n
     end
-    for m in (iv_f, iv_m)
+    for m in (ols_f, iv_f, ols_m, iv_m)
         @test Matrix(vcov(CM.Uncorrelated(), m; dofadjust = false)) ≈
               Matrix(vcov(CM.Uncorrelated(), m)) .* dof_residual(m) / n
         @test_throws "do not apply to Uncorrelated()" vcov(CM.Uncorrelated(), m; prewhite = true)
@@ -873,6 +873,84 @@ end
     # `prewhite` does not apply to cluster estimators, on any code path.
     for m in (ols_f, iv_f)
         @test_throws "not supported by CR1" vcov(CM.CR1(:State), m; prewhite = true)
+    end
+end
+
+@testitem "Uncorrelated and the smoothers on every model type" tags = [:ols, :iv, :vcov] begin
+    using Regress, CSV, DataFrames, LinearAlgebra, StatsBase, GLM
+    using Regress: iv, TSLS, fe
+    import CovarianceMatrices as CM
+
+    df = DataFrame(CSV.File(joinpath(dirname(pathof(Regress)), "../dataset/Cigar.csv")))
+    n = nrow(df)
+    X = [ones(n) df.NDI df.Price]
+    Z = [ones(n) df.NDI df.Pimin]
+    f = @formula(Sales ~ NDI + Price)
+    ols_f = Regress.ols(df, f)
+    ols_m = Regress.ols(X, df.Sales)
+    iv_f = iv(TSLS(), df, @formula(Sales ~ NDI + (Price ~ Pimin)))
+    iv_m = iv(TSLS(), Z, X, df.Sales)
+    glm_f = lm(f, df)
+
+    # `Uncorrelated` is the iid variance σ²·B with σ² = RSS/dof_residual: R's
+    # `vcov(lm(...))`, with and without weights.
+    for m in (ols_f, ols_m)
+        @test Matrix(vcov(CM.Uncorrelated(), m)) ≈ vcov(glm_f) rtol = 1e-10
+    end
+    # R divides the weighted RSS by rows minus coefficients; GLM.jl's own `vcov` uses
+    # the sum of the weights instead.
+    ols_w = Regress.ols(df, f; weights = :Pop)
+    w = Float64.(df.Pop)
+    e_w = df.Sales - X * ((X' * (w .* X)) \ (X' * (w .* df.Sales)))
+    V_w = sum(w .* e_w .^ 2) / (n - 3) * inv(X' * (w .* X))
+    @test Matrix(vcov(CM.Uncorrelated(), ols_w)) ≈ V_w rtol = 1e-8
+
+    # With an absorbed fixed effect, the iid variance of the slopes equals that of the
+    # regression with one dummy per level.
+    ols_fe = Regress.ols(df, @formula(Sales ~ NDI + Price + fe(State)))
+    glm_dummies = lm(@formula(Sales ~ NDI + Price + State), df;
+        contrasts = Dict(:State => DummyCoding()))
+    @test Matrix(vcov(CM.Uncorrelated(), ols_fe)) ≈ vcov(glm_dummies)[2:3, 2:3] rtol = 1e-8
+
+    # IV: σ² · (X̂'X̂)⁻¹ with X̂ the first-stage fitted regressors.
+    Xhat = Z * (Z \ X)
+    e = df.Sales - X * (Xhat \ df.Sales)
+    V_iv = sum(abs2, e) / (n - 3) * inv(Xhat' * Xhat)
+    for m in (iv_f, iv_m)
+        @test Matrix(vcov(CM.Uncorrelated(), m)) ≈ V_iv rtol = 1e-10
+    end
+
+    # Collinear columns get NaN rows and columns, as in the sandwich estimators.
+    df.Price2 = 2 .* df.Price
+    V_col = Matrix(vcov(CM.Uncorrelated(), Regress.ols(df, @formula(Sales ~
+                                                                    NDI + Price + Price2))))
+    @test all(isnan, V_col[:, 4]) && all(isnan, V_col[4, :])
+    @test V_col[1:3, 1:3] ≈ vcov(glm_f) rtol = 1e-10
+
+    # `aVar` is the meat of the iid variance without the degrees-of-freedom factor.
+    for m in (ols_f, ols_m, iv_f, iv_m)
+        B = CM.bread(m)
+        @test n * B * aVar(CM.Uncorrelated(), m) * B ≈
+              Matrix(vcov(CM.Uncorrelated(), m; dofadjust = false)) rtol = 1e-10
+        @test aVar(CM.Uncorrelated(), m; scale = false) ≈ n * aVar(CM.Uncorrelated(), m)
+        @test_throws "do not apply to Uncorrelated()" aVar(CM.Uncorrelated(), m; demean = true)
+        @test_throws "does not accept the keyword(s) typo" vcov(CM.Uncorrelated(), m; typo = 1)
+    end
+
+    # Float32 models give a Float32 iid variance.
+    ols_32 = Regress.ols(df, f; double_precision = false)
+    @test eltype(vcov(CM.Uncorrelated(), ols_32)) == Float32
+
+    # The smoothers: CovarianceMatrices' value on a GLM fit, which applies the same
+    # n/(n-K) factor; the formula and matrix fits agree.
+    for k in (CM.UniformSmoother(3), CM.TriangularSmoother(3))
+        V = vcov(k, glm_f)
+        @test Matrix(vcov(k, ols_f)) ≈ V rtol = 1e-10
+        @test Matrix(vcov(k, ols_m)) ≈ V rtol = 1e-10
+        @test Matrix(vcov(k, iv_m)) ≈ Matrix(vcov(k, iv_f)) rtol = 1e-10
+        @test Matrix(vcov(k, iv_f; dofadjust = false)) ≈
+              Matrix(vcov(k, iv_f)) .* dof_residual(iv_f) / n rtol = 1e-12
+        @test stderror(iv_f + vcov(k)) ≈ stderror(k, iv_f)
     end
 end
 

@@ -707,14 +707,6 @@ function _regress_vcov(ve, m::IVEstimator{T}; dofadjust = true, demean = false,
 
     n = nobs(m)
     B = bread(m)
-    resid = residuals_for_vcov(m)
-
-    # `Uncorrelated` is the iid variance σ²·B.
-    if ve isa CovarianceMatrices.Uncorrelated
-        _check_iid_keywords(demean, prewhite)
-        σ² = sum(abs2, resid) / (dofadjust ? dof_residual(m) : n)
-        return _wrap_vcov(Symmetric(σ² * B), ve, nothing)
-    end
 
     A = _regress_aVar(ve, m; demean, prewhite)
     scale = T(n * _finite_sample_factor(ve, m, dofadjust))
@@ -1673,14 +1665,6 @@ function _regress_vcov(ve, m::IVMatrixEstimator{T}; dofadjust = true, demean = f
         prewhite = false) where {T}
     n = nobs(m)
     B = bread(m)
-    resid = m.postestimation.residuals
-
-    # Homoskedastic case
-    if ve isa CovarianceMatrices.Uncorrelated
-        _check_iid_keywords(demean, prewhite)
-        σ² = sum(abs2, resid) / (dofadjust ? dof_residual(m) : n)
-        return _wrap_vcov(Symmetric(σ² * B), ve, nothing)
-    end
 
     _check_ivmatrix_cr(ve, vcov)
 
