@@ -280,8 +280,7 @@ function _iv_first_stage_fstats_standard(
     F_kp_per_endo,
     p_kp_per_endo = compute_per_endogenous_fstats(
         Xendo_res, Z_res, Pip,
-        CovarianceMatrices.HR1(),
-        nobs, size(X, 2), dof_fes;
+        CovarianceMatrices.HR1(), dof_fes;
         Xendo_orig = Xendo, newZ = newZ
     )
 

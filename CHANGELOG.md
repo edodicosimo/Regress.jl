@@ -20,9 +20,26 @@
   models. The cache holds no leverage adjustments, so these returned CR1-type
   results.
 
-- **IV models fitted from matrices throw an `ArgumentError` for `vcov` with
-  `CR1`, `CR2` or `CR3`, and for `aVar` with `CR2` or `CR3`.** These returned
-  CR0 results. CR0 is unchanged.
+- **IV models fitted from matrices throw an `ArgumentError` for `vcov` and
+  `aVar` with `CR2` or `CR3`.** These returned CR0 results.
+
+- **One finite-sample factor per estimator, the same on OLS and IV models fitted
+  from a formula or from matrices.** The table is in the `vcov` docstring.
+  Variances that change:
+  - `CR2` and `CR3` no longer multiply the Bell–McCaffrey variance by
+    `G/(G-1)·(n-1)/(n-K)`; they equal R `sandwich::vcovCL(type = "HC2"/"HC3")`.
+  - `Cluster` is the raw sandwich on every model type. OLS models applied
+    `n/(n-K)`.
+  - HAC kernels, `EWC` and `VARHAC` apply `n/(n-K)` on IV models, as on OLS
+    models (`dofadjust = false` leaves it out).
+  - `CR0` on IV models fitted from matrices applies `(n-1)/(n-K)`, and `CR1`
+    works there.
+  - The `K` of `CR0` and `CR1` on IV models fitted from a formula counts every
+    coefficient, so IV `CR1` equals fixest. It counted one fewer.
+  - With absorbed fixed effects, the `K` of `CR0` and `CR1` counts a fixed
+    effect not nested in the cluster by its levels, and no longer adds an
+    intercept. `CR1` equals fixest with one or two fixed effects, on OLS and IV
+    models.
 
 - **`vcov`, `stderror` and `aVar` on Regress models throw an `ArgumentError`
   for an unknown keyword.** `vcov` and `stderror` take `dofadjust`, `demean`
@@ -34,6 +51,10 @@
   OLS models. With a single cluster dimension it was ignored.
 
 ### Fixed
+
+- `vcov` on Float32 models returns a Float32 matrix for every estimator.
+  `HC1`–`HC5`, the cluster estimators and the HAC kernels returned Float64 on
+  OLS or IV models.
 
 - Clusters named by column work with every cluster estimator (`CR0`–`CR3`,
   `Cluster`), with keywords, and on `vcov`, `stderror`, `aVar` and `+`.

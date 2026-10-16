@@ -415,16 +415,18 @@ end
     df.YearC = categorical(df.Year)
 
     # Clustering models (new API: save_cluster + post-estimation stderror)
-    # Uses fixest-style small sample correction: G/(G-1) * (n-1)/(n-K)
-    # with K.fixef = "nonnested" (FE nested in cluster not counted)
+    # CR0 and CR1 use fixest's small sample correction, (n-1)/(n-K) and
+    # G/(G-1) * (n-1)/(n-K), with K.fixef = "nonnested" (FE nested in cluster not
+    # counted). CR2 and CR3 apply no factor beyond their leverage adjustment.
 
     # CR estimators (cluster-robust) - no FE
     m = @formula Sales ~ Price
     x = Regress.ols(df, m, save_cluster = :State)
     @test stderror(CR0(:State), x)[2] ≈ 0.03749 atol = 1e-4  # No G/(G-1) adjustment
     @test stderror(CR1(:State), x)[2] ≈ 0.0379228 atol = 1e-4  # With G/(G-1)
-    @test stderror(CR2(:State), x)[2] ≈ 0.03840 atol = 1e-4  # Bell-McCaffrey leverage
-    @test stderror(CR3(:State), x)[2] ≈ 0.03889 atol = 1e-4  # Squared leverage
+    # R sandwich: vcovCL(lm(Sales ~ Price), cluster = ~State, type = "HC2"/"HC3")
+    @test stderror(CR2(:State), x)[2] ≈ 0.037967860762803771 rtol = 1e-8
+    @test stderror(CR3(:State), x)[2] ≈ 0.038447251186324069 rtol = 1e-8
 
     # CR estimators with FE (FE not nested in cluster)
     m = @formula Sales ~ Price + fe(State)
@@ -436,8 +438,10 @@ end
     x = Regress.ols(df, m, save_cluster = :State)
     @test stderror(CR0(:State), x)[1] ≈ 0.03535 atol = 1e-4  # No G/(G-1)
     @test stderror(CR1(:State), x)[1] ≈ 0.0357498 atol = 1e-4  # With G/(G-1)
-    @test stderror(CR2(:State), x)[1] ≈ 0.03617 atol = 1e-4  # Bell-McCaffrey leverage
-    @test stderror(CR3(:State), x)[1] ≈ 0.03659 atol = 1e-4  # Squared leverage
+    # The leverage is that of the demeaned design: with State dummies in the design,
+    # I - H_gg is singular for every cluster.
+    @test stderror(CR2(:State), x)[1] ≈ 0.03576334994601219 rtol = 1e-8
+    @test stderror(CR3(:State), x)[1] ≈ 0.03618563457257234 rtol = 1e-8
 end
 
 @testitem "OLS standard errors - multiway" tags = [:ols, :vcov, :cluster] begin

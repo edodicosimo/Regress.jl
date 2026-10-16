@@ -631,10 +631,7 @@ end
     @test Matrix(vcov(CM.HC1(), m)) ≈ FX_HETERO rtol = 1e-8
     @test Matrix(vcov(m + vcov(CM.HC1()))) ≈ FX_HETERO rtol = 1e-8
     @test Matrix(vcov(CM.Uncorrelated(), m)) ≈ FX_IID rtol = 1e-8
-    # The formula-IV cluster scale counts K = dof(m) = 2 here, where fixest counts
-    # the 3 coefficients.
-    n = nobs(m)
-    @test Matrix(vcov(CM.CR1(df.State), m)) ≈ FX_CL .* ((n - 3) / (n - 2)) rtol = 1e-8
+    @test Matrix(vcov(CM.CR1(df.State), m)) ≈ FX_CL rtol = 1e-8
     @test Matrix(vcov(m + vcov(CM.CR1(:State)))) ≈ Matrix(vcov(CM.CR1(df.State), m))
 
     # Constant weights leave every variance unchanged.
@@ -754,13 +751,9 @@ end
     end
     @test same(vcov(ols_f + vcov(CM.CachedCR(CM.CR1(:State), ols_f))), vcov(CM.CR1(:State), ols_f))
     @test same(vcov(iv_f + vcov(CM.CachedCR(CM.CR1(:State), iv_f))), vcov(CM.CR1(:State), iv_f))
-    # A matrix-fitted IV model computes CR0 only, cached or not.
-    for k in by_vector(CM.CR0)
+    # A matrix-fitted IV model computes CR0 and CR1, cached or not.
+    for k in (by_vector(CM.CR0)..., by_vector(CM.CR1)...)
         @test same(vcov(CM.CachedCR(k, iv_m), iv_m), vcov(k, iv_m))
-    end
-    for k in by_vector(CM.CR1)
-        @test_throws "is not implemented for IV models fitted from matrices" vcov(
-            CM.CachedCR(k, iv_m), iv_m)
     end
 
     for m in (ols_f, iv_f, ols_m, iv_m)
@@ -793,8 +786,7 @@ end
         @test_throws "CachedCR on a Regress model supports CR0 and CR1" vcov(cached, model)
     end
 
-    # An IV model fitted from matrices has no cluster correction in `vcov` and no
-    # leverage adjustment, so only CR0 is computed.
+    # An IV model fitted from matrices has no leverage adjustment, so CR2 and CR3 throw.
     n = nrow(df)
     model_iv_mat = Regress.iv(
         TSLS(), [ones(n) df.Price df.NDI], [ones(n) df.Pimin df.NDI], df.Sales;
@@ -803,7 +795,8 @@ end
     @test Matrix(aVar(CM.CR1(df.State), model_iv_mat)) ≈
           Matrix(aVar(CM.CR0(df.State), model_iv_mat))
     not_implemented = "is not implemented for IV models fitted from matrices"
-    for K in (CM.CR1, CM.CR2, CM.CR3)
+    @test all(isfinite, stderror(CM.CR1(df.State), model_iv_mat))
+    for K in (CM.CR2, CM.CR3)
         @test_throws not_implemented vcov(K(df.State), model_iv_mat)
     end
     for K in (CM.CR2, CM.CR3)
@@ -880,5 +873,146 @@ end
     # `prewhite` does not apply to cluster estimators, on any code path.
     for m in (ols_f, iv_f)
         @test_throws "not supported by CR1" vcov(CM.CR1(:State), m; prewhite = true)
+    end
+end
+
+@testitem "One finite-sample factor on every model type" tags = [:vcov, :cluster] begin
+    using Regress, CSV, DataFrames, LinearAlgebra, StatsBase
+    using Regress: fe
+    import CovarianceMatrices as CM
+
+    df = DataFrame(CSV.File(joinpath(dirname(pathof(Regress)), "../dataset/Cigar.csv")))
+    n = nrow(df)
+    X = [ones(n) df.NDI df.Price]
+    Z = [ones(n) df.NDI df.Pimin]
+    saved = [:State, :Year]
+    models = (
+        ols_f = Regress.ols(df, @formula(Sales ~ NDI + Price); save_cluster = saved),
+        ols_m = Regress.ols(X, df.Sales),
+        iv_f = Regress.iv(TSLS(), df, @formula(Sales ~ NDI + (Price ~ Pimin)); save_cluster = saved),
+        iv_m = Regress.iv(TSLS(), Z, X, df.Sales))
+    s = df.State
+    K, G = 3, 46
+
+    # vcov(k, m) = factor · n · B · aVar(k, m) · B, with the same factor on every type.
+    raw(k, m) = n .* Matrix(CM.bread(m)) * Matrix(aVar(k, m)) * Matrix(CM.bread(m))
+    long_run = n / (n - K)
+    factors = [
+        (CM.HC0(), 1),
+        (CM.CR0(s), (n - 1) / (n - K)),
+        (CM.CR1(s), G / (G - 1) * (n - 1) / (n - K)),
+        (CM.CR0(s, df.Year), (n - 1) / (n - K)),
+        (CM.CR1(s, df.Year), 30 / 29 * (n - 1) / (n - K)),
+        (CM.Cluster(s), 1),
+        (CM.Bartlett(3), long_run),
+        (CM.Parzen(4), long_run),
+        (CM.EWC(5), long_run),
+        (CM.VARHAC(), long_run)]
+    for (name, m) in pairs(models), (k, c) in factors
+
+        @test Matrix(vcov(k, m)) ≈ c .* raw(k, m) rtol = 1e-10
+    end
+    for (name, m) in pairs(models), k in (CM.Bartlett(3), CM.EWC(5), CM.VARHAC())
+
+        @test Matrix(vcov(k, m; dofadjust = false)) ≈ raw(k, m) rtol = 1e-10
+    end
+    # CR2/CR3: the leverage adjustment is the whole small-sample correction.
+    for m in (models.ols_f, models.ols_m, models.iv_f), k in (CM.CR2(s), CM.CR3(s))
+
+        @test Matrix(vcov(k, m)) ≈ raw(k, m) rtol = 1e-10
+    end
+
+    # The formula and matrix fits agree.
+    for k in (CM.HC1(), CM.HC3(), CM.CR0(s), CM.CR1(s), CM.CR1(s, df.Year), CM.Cluster(s),
+        CM.Bartlett(3), CM.EWC(5))
+        @test Matrix(vcov(k, models.ols_f)) ≈ Matrix(vcov(k, models.ols_m)) rtol = 1e-10
+        @test Matrix(vcov(k, models.iv_f)) ≈ Matrix(vcov(k, models.iv_m)) rtol = 1e-10
+    end
+    @test Matrix(vcov(CM.CR2(s), models.ols_f)) ≈ Matrix(vcov(CM.CR2(s), models.ols_m)) rtol = 1e-10
+
+    # References: R fixest `vcov(feols(...), cluster = ...)`, R sandwich
+    # `vcovCL(lm/ivreg, cluster = ~State, type = "HC2"/"HC3")` and
+    # `NeweyWest(lm/ivreg, lag = 2, prewhite = FALSE, adjust = TRUE)`, as lower
+    # triangles. fixest orders IV coefficients (Intercept), fit_Price, NDI.
+    function sym(v)
+        p = round(Int, (sqrt(8 * length(v) + 1) - 1) / 2)
+        V = zeros(p, p)
+        c = 0
+        for j in 1:p, i in j:p
+
+            c += 1
+            V[i, j] = V[j, i] = v[c]
+        end
+        return V
+    end
+    swap(V, p) = V[p, p]
+    FX_OLS = sym([33.101306102670804, 0.0027106446881726368, -0.53232473252771173,
+        2.2749594185295716e-06, -0.00025086602205973163, 0.029905104571217141])
+    FX_IV = swap(
+        sym([28.487937894214205, -0.1151242908755795, -0.00057016234798797679,
+            0.014886255940823583, -0.00013579943728150474, 1.3759832857083032e-06]),
+        [1, 3, 2])
+    R_OLS_CR2 = sym([33.087693216089228, 0.0027665643879009123, -0.53760737479273302,
+        2.3831458948573353e-06, -0.00026207275447796076, 0.031065868152410695])
+    R_OLS_CR3 = sym([33.858895156437555, 0.0028891631436766731, -0.55574212342188067,
+        2.5562965093482169e-06, -0.00028033334487304989, 0.0330468917708951])
+    R_IV_CR2 = sym([28.41856918221513, -0.00061590134903652741, -0.10977215717738231,
+        1.4291115244054496e-06, -0.00014078139009024253, 0.015349991843334026])
+    R_IV_CR3 = sym([29.021861053566585, -0.00068032925345701376, -0.10659649012338861,
+        1.5204169953676826e-06, -0.00014949417848441739, 0.016213449203923092])
+    R_OLS_NW = sym([6.9420352565162702, 0.00013538793359429581, -0.079648518164795207,
+        6.45080916441141e-07, -6.7917032405733676e-05, 0.0078878140592045388])
+    R_IV_NW = sym([6.6064658057553247, -0.00017937647777714475, -0.040716770020660306,
+        5.473647329840687e-07, -5.6128326000303502e-05, 0.0064231980087076646])
+    # rtol = 1e-8 separates the n - 2 and n - 3 divisors (a 7e-4 difference).
+    for m in (models.ols_f, models.ols_m)
+        @test Matrix(vcov(CM.CR1(s), m)) ≈ FX_OLS rtol = 1e-8
+        @test Matrix(vcov(CM.Bartlett(3), m)) ≈ R_OLS_NW rtol = 1e-8
+    end
+    for m in (models.iv_f, models.iv_m)
+        @test Matrix(vcov(CM.CR1(s), m)) ≈ FX_IV rtol = 1e-8
+        @test Matrix(vcov(CM.Bartlett(3), m)) ≈ R_IV_NW rtol = 1e-8
+    end
+    @test Matrix(vcov(CM.CR1(:State), models.iv_f + vcov(CM.CR1(:State)))) ≈ FX_IV rtol = 1e-8
+    @test Matrix(vcov(models.iv_f + vcov(CM.CR1(:State)))) ≈ FX_IV rtol = 1e-8
+    @test Matrix(vcov(CM.CR2(:State), models.ols_f)) ≈ R_OLS_CR2 rtol = 1e-8
+    @test Matrix(vcov(CM.CR3(:State), models.ols_f)) ≈ R_OLS_CR3 rtol = 1e-8
+    @test Matrix(vcov(CM.CR2(:State), models.iv_f)) ≈ R_IV_CR2 rtol = 1e-8
+    @test Matrix(vcov(CM.CR3(:State), models.iv_f)) ≈ R_IV_CR3 rtol = 1e-8
+
+    # Absorbed fixed effects: K counts the levels of a fixed effect not nested in the
+    # cluster, 1 for one nested in it, and one fewer for each fixed effect after the
+    # first. References: fixest, coefficients NDI, Price (IV: fit_Price, NDI).
+    FX_OLS_Y = sym([3.572874362209166e-06, -0.00045874765890869791, 0.20936451595657735])
+    FX_OLS_SY = sym([6.4336808300132044e-06, 1.065526439610895e-05, 0.036031395973454255])
+    FX_OLS_SY2 = sym([6.4578430344072088e-06, 5.7988471344731665e-05, 0.053033114582239665])
+    FX_IV_Y = swap(
+        sym([
+            0.42213764246917657, -0.00018653903989976047, 2.170941818130433e-06]), [2, 1])
+    FX_IV_S = swap(
+        sym([
+            0.035849481006982327, -0.00036941457079929068, 3.8826017168438157e-06]), [2, 1])
+    ols_y = Regress.ols(df, @formula(Sales ~ NDI + Price + fe(Year)); save_cluster = saved)
+    ols_sy = Regress.ols(df, @formula(Sales ~ NDI + Price + fe(State) + fe(Year));
+        save_cluster = saved)
+    iv_y = Regress.iv(TSLS(), df, @formula(Sales ~ NDI + (Price ~ Pimin) + fe(Year)); save_cluster = saved)
+    iv_s = Regress.iv(TSLS(), df, @formula(Sales ~ NDI + (Price ~ Pimin) + fe(State)); save_cluster = saved)
+    @test Matrix(vcov(CM.CR1(:State), ols_y)) ≈ FX_OLS_Y rtol = 1e-8
+    @test Matrix(vcov(CM.CR1(:State), ols_sy)) ≈ FX_OLS_SY rtol = 1e-8
+    @test Matrix(vcov(CM.CR1(:State, :Year), ols_sy)) ≈ FX_OLS_SY2 rtol = 1e-8
+    @test Matrix(vcov(CM.CR1(:State), iv_y)) ≈ FX_IV_Y rtol = 1e-8
+    @test Matrix(vcov(CM.CR1(:State), iv_s)) ≈ FX_IV_S rtol = 1e-8
+
+    # A Float32 model gives a Float32 variance.
+    models32 = (
+        Regress.ols(df, @formula(Sales ~ NDI + Price); double_precision = false),
+        Regress.ols(Float32.(X), Float32.(df.Sales)),
+        Regress.iv(TSLS(), df, @formula(Sales ~ NDI + (Price ~ Pimin)); double_precision = false),
+        Regress.iv(TSLS(), Float32.(Z), Float32.(X), Float32.(df.Sales)))
+    for m in models32,
+        k in (CM.HC0(), CM.HC1(), CM.HC3(), CM.CR0(s), CM.CR1(s),
+            CM.Cluster(s), CM.Bartlett(3), CM.EWC(5))
+
+        @test eltype(vcov(k, m)) === Float32
     end
 end

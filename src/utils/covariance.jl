@@ -395,10 +395,11 @@ end
 # The moment matrix of an OLS model is `X .* (y - mu)`; `y` and `mu` are already
 # weighted for a weighted model.
 function _regress_aVar(k, m::OLSModel; demean = false, prewhite = false, scale = true)
-    u = residualadjustment(k, m)
     X = modelmatrix(m)
     y = m.rr.y
     mu = m.rr.mu
+    # The adjustment can be Float64 on a Float32 model; the moments keep the model's type.
+    u = eltype(X).(residualadjustment(k, m))
     mm = @. X * (y - mu) * u
     # Bandwidth-selection weights come from the model matrix, not the moment
     # matrix: they must give the intercept weight 0, and the intercept column of
@@ -650,7 +651,7 @@ end
 
 # CR0/CR1 need no per-observation adjustment: the clustering is handled by
 # `CovarianceMatrices.aVar`, and the finite-sample correction is applied as a
-# scale factor in `vcov` (`_cluster_robust_scale`, matching fixest) rather than
+# scale factor in `vcov` (`_finite_sample_factor`, matching fixest) rather than
 # being folded into the residuals as upstream does.
 @noinline residualadjustment(k::CM.CR0, r::OLSModel) = 1.0
 @noinline residualadjustment(k::CM.CR1, r::OLSModel) = 1.0
@@ -660,122 +661,94 @@ end
 
 ##############################################################################
 ##
-## Cluster-robust small sample correction (fixest-compatible)
+## Finite-sample factors
+##
+## Every sandwich `vcov` on a Regress model is `c · n · B · aVar(k, m) · B`, with
+## bread `B` and the factor `c = _finite_sample_factor(k, m, dofadjust)`. The factor
+## depends on the estimator family only, and is the same on the four model types.
 ##
 ##############################################################################
 
 """
-    _cluster_robust_scale(k::CM.CR, m::OLSEstimator, n::Int)
+    _finite_sample_factor(k, m, dofadjust) -> Real
 
-Compute the scale factor for cluster-robust variance estimation using
-fixest-style small sample correction.
+Factor `c` in `vcov(k, m) = c · n · B · aVar(k, m) · B`. `n · B · aVar(k, m) · B` is the
+raw sandwich for every estimator except `HR1`, whose `n / dof_residual(m)` is part of its
+residual adjustment.
 
-# Formula
-`scale = n * G/(G-1) * (n-1)/(n-K)` where:
-- G = number of clusters (for multi-way: minimum cluster count)
-- K = k + k_fe_nonnested (only FE NOT nested in cluster are counted)
-
-With K.fixef = "nonnested" (fixest default):
-- FE nested in the cluster variable are NOT counted in K
-- FE NOT nested in the cluster variable ARE counted in K
-
-This matches R fixest's default behavior for cluster-robust standard errors.
+- `HR0`–`HR5`: 1.
+- `CR0`: (n−1)/(n−K), and `CR1`: G/(G−1)·(n−1)/(n−K), where G is the smallest number of
+  clusters over the cluster dimensions and K is `_cluster_dof(k, m)` (fixest's default).
+- `CR2`, `CR3`: 1; the leverage adjustment is their small-sample correction.
+- `Cluster`: 1.
+- Other `Correlated` estimators (HAC, EWC, VARHAC) and the smoothers: n / dof_residual(m),
+  or 1 with `dofadjust = false`.
 """
-function _cluster_robust_scale(k::CM.CR, m::OLSEstimator, n::Int)
-    # Get cluster groupings from the CR estimator
-    cluster_groups = CM.clusters(k)
-
-    # G = number of clusters (for multi-way, use minimum)
+_finite_sample_factor(k, m, dofadjust) = 1
+function _finite_sample_factor(k::Union{CM.Correlated, CM.MomentSmoother}, m, dofadjust)
+    return dofadjust ? nobs(m) / dof_residual(m) : 1
+end
+_finite_sample_factor(k::Union{CM.CR2, CM.CR3, CM.Cluster}, m, dofadjust) = 1
+function _finite_sample_factor(k::CM.CR0, m, dofadjust)
+    n = nobs(m)
+    return (n - 1) / (n - _cluster_dof(k, m))
+end
+function _finite_sample_factor(k::CM.CR1, m, dofadjust)
+    n = nobs(m)
     G = minimum(CM.nclusters(k))
-
-    # G/(G-1) adjustment (cluster DOF correction) - only for CR1, CR2, CR3
-    # CR0 has no small-sample adjustment
-    G_adj = k isa CM.CR0 ? 1.0 : G / (G - 1)
-
-    # Compute K for (n-1)/(n-K) adjustment using K.fixef = "nonnested"
-    # K = k (non-FE params) + FE DOF for FE not nested in cluster
-    # For CR0, we still apply the (n-1)/(n-K) adjustment for consistency
-    k_params = dof(m)
-    k_fe_nonnested = _compute_nonnested_fe_dof(m, cluster_groups)
-
-    # Account for intercept absorbed by FE (Stata/fixest behavior)
-    # When FE absorbs an intercept, it should be counted in K
-    k_fe_intercept = (has_fe(m) && !model_hasintercept(m)) ? 1 : 0
-
-    K = k_params + k_fe_nonnested + k_fe_intercept
-
-    # (n-1)/(n-K) adjustment (parameter DOF correction)
-    # For CR0, this is the only adjustment applied
-    K_adj = (n - 1) / (n - K)
-
-    # Final scale: n * G_adj * K_adj
-    # The n factor is because aVar returns (sum)/n, and vcov computes scale * B * A * B
-    return convert(Float64, n * G_adj * K_adj)
+    return G / (G - 1) * (n - 1) / (n - _cluster_dof(k, m))
+end
+function _finite_sample_factor(k::CM.CachedCR, m, dofadjust)
+    return _finite_sample_factor(CM.estimator(k), m, dofadjust)
 end
 
 """
-    _compute_nonnested_fe_dof(m::OLSEstimator, cluster_groups)
+    _cluster_dof(k::CR, m) -> Int
 
-Compute the DOF for fixed effects that are NOT nested in the cluster variable(s).
+The number of parameters K in the (n−1)/(n−K) factor of `CR0` and `CR1`, as fixest
+counts it: the estimable coefficients, plus, for each absorbed fixed effect, its number
+of levels, or 1 if it is nested in one of the cluster dimensions of `k`, minus one for
+each fixed effect after the first (the levels of each additional fixed effect hold one
+redundant parameter). A model with absorbed fixed effects has no intercept coefficient.
 
-A fixed effect is "nested" in a cluster if every FE group is contained within
-exactly one cluster group (fixest behavior). When FE is nested, it doesn't add
-information beyond the clustering and shouldn't be counted in the K adjustment.
-
-Returns 0 if all FE are nested in the clustering, or the sum of ngroups for
-non-nested FEs.
+A fixed effect is nested in a cluster dimension when each of its levels lies within a
+single cluster. Without stored fixed-effect groups (a model fitted with
+`save = :minimal`), a fixed effect counts as nested when a cluster column saved with the
+model has its name.
 """
-function _compute_nonnested_fe_dof(m::OLSEstimator, cluster_groups)
-    # If no fixed effects, return 0
-    dof_fes(m) == 0 && return 0
-
-    # Get FE names from model
-    fe_names = m.fes.fe_names
-    isempty(fe_names) && return 0
-
-    fe_groups = m.fes.fe_groups
-    ngroups = m.fes.ngroups
-
-    # Fallback for :minimal mode (no fe_groups stored)
-    if isempty(fe_groups)
-        return _compute_nonnested_fe_dof_by_name(m, cluster_groups)
-    end
-
-    # Extract cluster refs from the CR estimator's grouping objects
-    cluster_refs_list = [CM.groups(g) for g in cluster_groups]
-
-    k_fe_nonnested = 0
-    for (i, fe_name) in enumerate(fe_names)
-        # A FE is nested if it's nested in ANY cluster dimension
-        is_nested = any(crefs -> _isnested_groups(fe_groups[i], crefs, ngroups[i]),
-            cluster_refs_list)
-        if !is_nested
-            k_fe_nonnested += ngroups[i]
+function _cluster_dof(k, m::Union{OLSEstimator, IVEstimator})
+    K = sum(CM.mask(m))
+    (; names, groups, ngroups, cluster_names) = _fe_structure(m)
+    isempty(names) && return K
+    cluster_refs = map(CM.groups, CM.clusters(k))
+    for i in eachindex(names, ngroups)
+        nested = if isempty(groups)
+            names[i] in cluster_names
+        else
+            any(refs -> _isnested(groups[i], refs, ngroups[i]), cluster_refs)
         end
+        K += nested ? 1 : ngroups[i]
     end
+    return K - (length(names) - 1)
+end
+_cluster_dof(k, m::Union{OLSMatrixEstimator, IVMatrixEstimator}) = sum(CM.mask(m))
 
-    return k_fe_nonnested
+function _fe_structure(m::OLSEstimator)
+    fes = m.fes
+    return (; names = fes.fe_names, groups = fes.fe_groups, ngroups = fes.ngroups,
+        cluster_names = keys(fes.clusters))
 end
 
 """
-    _isnested_groups(fe_refs::Vector{Int}, cluster_refs::Vector{Int}, n_fe_groups::Int) -> Bool
+    _isnested(fe_refs, cluster_refs, n_fe_groups) -> Bool
 
-Check if fixed effect groups are nested within cluster groups.
-
-A FE is nested in a cluster if every FE group belongs to exactly one cluster group.
-This is the fixest definition of nesting.
-
-# Arguments
-- `fe_refs`: Vector of FE group assignments (length n, values 1:n_fe_groups)
-- `cluster_refs`: Vector of cluster group assignments (length n)
-- `n_fe_groups`: Number of unique FE groups
-
-# Returns
-- `true` if every FE group maps to exactly one cluster group
+Whether every one of the `n_fe_groups` fixed-effect groups in `fe_refs` (codes
+`1:n_fe_groups`) lies within a single cluster of `cluster_refs`.
 """
-function _isnested_groups(fe_refs::Vector{Int}, cluster_refs::Vector{Int}, n_fe_groups::Int)
+function _isnested(fe_refs::AbstractVector{<:Integer},
+        cluster_refs::AbstractVector{<:Integer}, n_fe_groups::Integer)
     entries = zeros(Int, n_fe_groups)
-    @inbounds for i in eachindex(fe_refs, cluster_refs)
+    for i in eachindex(fe_refs, cluster_refs)
         feref, cref = fe_refs[i], cluster_refs[i]
         if entries[feref] == 0
             entries[feref] = cref
@@ -786,100 +759,24 @@ function _isnested_groups(fe_refs::Vector{Int}, cluster_refs::Vector{Int}, n_fe_
     return true
 end
 
-"""
-    _compute_nonnested_fe_dof_by_name(m::OLSEstimator, cluster_groups)
-
-Fallback nesting detection using name-matching heuristic.
-Used when fe_groups are not available (e.g., :minimal save mode).
-
-FE is considered nested if its name matches one of the cluster names.
-"""
-function _compute_nonnested_fe_dof_by_name(m::OLSEstimator, cluster_groups)
-    fe_names = m.fes.fe_names
-    ngroups = m.fes.ngroups
-    cluster_names = keys(m.fes.clusters)
-
-    k_fe_nonnested = 0
-    for (i, fe_name) in enumerate(fe_names)
-        is_nested = fe_name in cluster_names
-        if !is_nested
-            k_fe_nonnested += ngroups[i]
-        end
-    end
-
-    return k_fe_nonnested
-end
-
-function _regress_vcov(k, m::OLSEstimator; dofadjust = true, demean = false,
+function _regress_vcov(k, m::OLSModel; dofadjust = true, demean = false,
         prewhite = false)
     A = _regress_aVar(k, m; demean, prewhite)
-    n = nobs(m)
     B = invchol(m.pp)
     basis_coef = m.basis_coef
+    scale = eltype(B)(nobs(m) * _finite_sample_factor(k, m, dofadjust))
 
-    # The aVar function returns M'M/n (where M is the adjusted moment matrix).
-    # For HR1, residualadjustment = √(n/dof_residual), so the adjusted moment matrix
-    # already incorporates part of the DOF adjustment.
-    #
-    # For HC0/HR0: V = n * B * (M'M/n) * B = B * M'M * B
-    # For HC1/HR1: V = n/(n-k-k_fe) * B * M'M * B  (with proper DOF)
-    # For cluster-robust: Use fixest-style small sample correction
-
-    ku = _uncached(k)
-    scale = if ku isa Union{CM.HC1, CM.HR1}
-        # HC1: DOF adjustment should account for both k and k_fe
-        # residualadjustment for HR1 already applied √(n/dof_residual)
-        # So aVar returns M'M * (n/dof_residual) / n = M'M / dof_residual
-        # We want final scale = n / (n - k - k_fe)
-        # With aVar = M'M / dof_residual and dof_residual ≈ n - k - k_fe - 1,
-        # we need: scale * (1/dof_residual) = n / (n - k - k_fe)
-        # => scale = n * dof_residual / (n - k - k_fe)
-        p_total = dof(m) + dof_fes(m)
-        n * dof_residual(m) / (n - p_total)
-    elseif ku isa Union{CM.CR0, CM.CR1, CM.CR2, CM.CR3}
-        # Cluster-robust: Use fixest-style small sample correction
-        # Formula: G/(G-1) * (n-1)/(n-K) where:
-        #   - G = number of clusters (for multi-way: minimum cluster count)
-        #   - K = k + k_fe_nonnested (FE not nested in cluster are counted)
-        # With K.fixef = "nonnested" (fixest default):
-        #   - FE nested in cluster variable are NOT counted in K
-        #   - FE NOT nested in cluster variable ARE counted in K
-        _cluster_robust_scale(ku, m, n)
-    elseif ku isa CM.Correlated && dofadjust
-        # Correlated (HAC, EWC, etc.): Apply DOF correction n/(n-p)
-        # p_total includes both model parameters and fixed effects DOF
-        p_total = dof(m) + dof_fes(m)
-        n * n / (n - p_total)
-    else
-        # HC0/HR0: no DOF adjustment, scale = n
-        convert(eltype(A), n)
-    end
-
-    # Handle dimension mismatch when there is collinearity:
-    # - A is k×k (full size, finite throughout)
-    # - B is k_reduced×k_reduced (from factorization on non-collinear columns)
-    # We need to extract the valid submatrix, compute sandwich, then expand back
+    # With collinear columns, A is k×k while B covers only the estimable columns:
+    # compute the sandwich on those, and fill the rest with NaN.
     if !all(basis_coef)
-        k_full = length(basis_coef)
         valid_idx = findall(basis_coef)
-
-        # Extract valid submatrix of A
-        A_valid = A[valid_idx, valid_idx]
-
-        # Compute sandwich on reduced dimensions
-        Σ_valid = scale .* B * A_valid * B
-
-        # Expand back to full size with NaN for collinear entries
-        T = eltype(Σ_valid)
-        Σ = fill(T(NaN), k_full, k_full)
+        Σ_valid = scale .* B * A[valid_idx, valid_idx] * B
+        Σ = fill(eltype(Σ_valid)(NaN), length(basis_coef), length(basis_coef))
         Σ[valid_idx, valid_idx] = Σ_valid
-
         return _wrap_vcov(Σ, k, A)
     end
 
-    Σ = scale .* B * A * B
-
-    return _wrap_vcov(Σ, k, A)
+    return _wrap_vcov(scale .* B * A * B, k, A)
 end
 
 # Driscoll-Kraay variance, computed by CovarianceMatrices' `vcov` for a
@@ -973,51 +870,6 @@ function _wrap_vcov(Σ, estimator, A::CovarianceMatrix)
     return CovarianceMatrix(Σ, estimator, CovarianceMatrices.information(A))
 end
 
-function _regress_vcov(k, m::OLSMatrixEstimator; dofadjust = true, demean = false,
-        prewhite = false)
-    A = _regress_aVar(k, m; demean, prewhite)
-    n = nobs(m)
-    B = invchol(m.pp)
-    basis_coef = m.basis_coef
-    ku = _uncached(k)
-
-    scale = if ku isa Union{CM.HC1, CM.HR1}
-        # HC1: DOF adjustment
-        p_total = dof(m)
-        n * dof_residual(m) / (n - p_total)
-    elseif ku isa Union{CM.CR0, CM.CR1, CM.CR2, CM.CR3}
-        # Cluster-robust: simple G/(G-1) * (n-1)/(n-K) adjustment
-        # For matrix estimator, no fixed effects so K = k
-        G = minimum(CM.nclusters(ku))
-        G_adj = ku isa CM.CR0 ? 1.0 : G / (G - 1)
-        K = dof(m)
-        K_adj = (n - 1) / (n - K)
-        convert(Float64, n * G_adj * K_adj)
-    elseif ku isa CM.Correlated && dofadjust
-        # Correlated (HAC, EWC, etc.): Apply DOF correction n/(n-p)
-        # For matrix estimator, no fixed effects so p = dof(m)
-        p = dof(m)
-        n * n / (n - p)
-    else
-        # HC0/HR0: no DOF adjustment, scale = n
-        convert(eltype(A), n)
-    end
-
-    # Handle collinearity
-    if !all(basis_coef)
-        k_full = length(basis_coef)
-        valid_idx = findall(basis_coef)
-        A_valid = A[valid_idx, valid_idx]
-        Σ_valid = scale .* B * A_valid * B
-        T = eltype(Σ_valid)
-        Σ = fill(T(NaN), k_full, k_full)
-        Σ[valid_idx, valid_idx] = Σ_valid
-        return _wrap_vcov(Σ, k, A)
-    end
-
-    return _wrap_vcov(scale .* B * A * B, k, A)
-end
-
 function StatsAPI.confint(ve::CovarianceMatrices.AbstractAsymptoticVarianceEstimator,
         m::OLSMatrixEstimator; level::Real = 0.95)
     scale = tdistinvcdf(StatsAPI.dof_residual(m), 1 - (1 - level) / 2)
@@ -1064,6 +916,31 @@ Cluster-robust estimators (`CR0`–`CR3`, `Cluster`) may name their clusters by 
 as in `CR1(:firm)` or `CR1(:firm, :year)`, on a model fitted from a formula with
 `save_cluster`; the column data stored with the model is used. A model fitted from
 matrices stores no cluster data and needs the group identifiers, as in `CR1(groups)`.
+
+# Finite-sample factors
+Each estimator multiplies the raw sandwich `B · (Σ moments) · B` by one factor, the same
+on all four model types. `n` is the number of observations, `G` the number of clusters
+(with several cluster dimensions, the smallest), and `n - K = dof_residual(m)`.
+
+| Estimator | Factor |
+|:--|:--|
+| `HC0`, `HC2`–`HC5` | 1 (`HC2`–`HC5` rescale each residual by its leverage) |
+| `HC1` | `n/(n-K)` |
+| `CR0` | `(n-1)/(n-Kc)` |
+| `CR1` | `G/(G-1) · (n-1)/(n-Kc)` |
+| `CR2`, `CR3` | 1 (the Bell–McCaffrey leverage adjustment) |
+| `Cluster` | 1 |
+| HAC kernels, `EWC`, `VARHAC`, smoothers | `n/(n-K)` |
+| `DriscollKraay` | its `correction` |
+| `Uncorrelated` | `σ² · (X'X)⁻¹` with `σ² = RSS/(n-K)` |
+
+`HC1` and `CR1` equal R fixest's defaults, and `CR0` equals fixest with
+`ssc(cluster.adj = FALSE)`. `CR2`, `CR3` and the HAC kernels equal R sandwich
+(`vcovCL`, `NeweyWest(adjust = TRUE)`). `Kc` counts the parameters as
+fixest does: the coefficients, plus, for each absorbed fixed effect, its number of
+levels, or 1 if it is nested in a cluster dimension, minus one for each fixed effect
+after the first. With several cluster dimensions, R `vcovCL` applies `G_d/(G_d-1)` to
+each dimension instead of the uniform `G/(G-1)`.
 
 # Keywords
 - `dofadjust`: apply the degrees-of-freedom factor that is not part of the estimator's

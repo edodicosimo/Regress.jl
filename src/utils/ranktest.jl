@@ -262,7 +262,7 @@ end
 ##############################################################################
 
 """
-    compute_per_endogenous_fstats(Xendo_res, Z_res, Pi, vcov_type, nobs, dof_small, dof_fes;
+    compute_per_endogenous_fstats(Xendo_res, Z_res, Pi, vcov_type, dof_fes;
                                    Xendo_orig=nothing, newZ=nothing)
 
 Compute F-statistics for each endogenous variable's first-stage regression.
@@ -276,8 +276,6 @@ For each endogenous variable j:
 - `Z_res::Matrix{T}`: Residualized instruments (n × l)
 - `Pi::Matrix{T}`: First-stage coefficient matrix (l × k), instruments portion only
 - `vcov_type`: Variance estimator type (from CovarianceMatrices.jl)
-- `nobs::Int`: Number of observations
-- `dof_small::Int`: Degrees of freedom (number of parameters)
 - `dof_fes::Int`: Degrees of freedom absorbed by fixed effects
 - `Xendo_orig::Union{Matrix{T}, Nothing}`: Original endogenous (for robust F)
 - `newZ::Union{Matrix{T}, Nothing}`: Full first-stage design [Xexo, Z] (for robust F)
@@ -290,8 +288,6 @@ function compute_per_endogenous_fstats(
         Z_res::Matrix{T},
         Pi::Matrix{T},
         vcov_type,
-        nobs::Int,
-        dof_small::Int,
         dof_fes::Int;
         Xendo_orig::Union{Matrix{T}, Nothing} = nothing,
         newZ::Union{Matrix{T}, Nothing} = nothing

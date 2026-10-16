@@ -659,11 +659,9 @@ function _regress_aVar(k, m::IVEstimator; demean = false, prewhite = false, scal
     pe = m.postestimation
     X_for_vcov = has_kclass_adj(pe) ? pe.Adj : pe.X_fitted
 
-    u = residualadjustment(k, m)
     M = X_for_vcov .* residuals_for_vcov(m)
-    if !(u isa Number && u == 1.0)
-        M = M .* u
-    end
+    # The adjustment can be Float64 on a Float32 model; the moments keep the model's type.
+    M = M .* eltype(M).(residualadjustment(k, m))
 
     # Bandwidth-selection weights come from the regressor matrix, not the moment
     # matrix: they must give the intercept weight 0, and the intercept column of
@@ -708,46 +706,18 @@ function _regress_vcov(ve, m::IVEstimator{T}; dofadjust = true, demean = false,
         error("Model does not have residuals stored. Use save=:residuals or save=:all when fitting.")
 
     n = nobs(m)
-    k = dof(m)
     B = bread(m)
     resid = residuals_for_vcov(m)
 
-    # Check for truly homoskedastic variance estimators (not HC0/HC1)
-    # Uncorrelated() assumes i.i.d. errors
+    # `Uncorrelated` is the iid variance σ²·B.
     if ve isa CovarianceMatrices.Uncorrelated
         _check_iid_keywords(demean, prewhite)
         σ² = sum(abs2, resid) / (dofadjust ? dof_residual(m) : n)
         return _wrap_vcov(Symmetric(σ² * B), ve, nothing)
     end
 
-    # Sandwich variance: V = scale * B * A * B where A = aVar(k, m)
-    # HC0/HR0, HC1/HR1, HC2, HC3, etc. all use sandwich form
     A = _regress_aVar(ve, m; demean, prewhite)
-
-    # Scale factor depends on estimator type
-    # Note: HC0 = HR0, HC1 = HR1 in CovarianceMatrices.jl
-    #
-    # The aVar function returns M'M/n where M is the adjusted moment matrix.
-    # For HC1 (HR1), residualadjustment = sqrt(n/dof_res), so:
-    #   aVar = M'M * (n/dof_res) / n = Meat / dof_res
-    # where Meat = X̂'diag(e²)X̂
-    #
-    # R's sandwich formula for IV with HC1 is:
-    #   V = (n/(n-k)) * B * Meat * B
-    #
-    # Since aVar = Meat / dof_res and dof_res = n - k:
-    #   V = (n/(n-k)) * (n-k) * B * aVar * B = n * B * aVar * B
-    #
-    # So for HC1, scale = n (the DOF adjustment is already in aVar via residualadjustment)
-    scale = if _uncached(ve) isa Union{_CM.CR0, _CM.CR1, _CM.CR2, _CM.CR3}
-        # Cluster-robust: use fixest-style correction
-        _cluster_robust_scale_iv(_uncached(ve), m, n)
-    else
-        # HC0/HR0, HC1/HR1, HC2/HR2, HC3/HR3, HC4, HC5: scale by n
-        # The DOF adjustment (for HC1) is handled via residualadjustment in aVar
-        convert(T, n)
-    end
-
+    scale = T(n * _finite_sample_factor(ve, m, dofadjust))
     Σ = scale .* B * A * B
     return _wrap_vcov(Symmetric(Σ), ve, A)
 end
@@ -761,140 +731,10 @@ function _regress_vcov(k::_CM.DriscollKraay, m::IVEstimator; kwargs...)
     return _wrap_vcov(Σ, k, nothing)
 end
 
-"""
-    _cluster_robust_scale_iv(k::_CM.CR, m::IVEstimator, n::Int)
-
-Compute the scale factor for cluster-robust variance estimation for IV models.
-Uses fixest-style small sample correction with FE nesting detection.
-
-# Formula
-`scale = n * G/(G-1) * (n-1)/(n-K)` where:
-- G = number of clusters (for multi-way: minimum cluster count)
-- K = k + k_fe_nonnested + k_fe_intercept (only FE NOT nested in cluster are counted)
-
-With K.fixef = "nonnested" (fixest default):
-- FE nested in the cluster variable are NOT counted in K
-- FE NOT nested in the cluster variable ARE counted in K
-
-This matches R fixest's behavior for IV models with cluster-robust standard errors.
-"""
-function _cluster_robust_scale_iv(k::_CM.CR, m::IVEstimator, n::Int)
-    cluster_groups = _CM.clusters(k)
-    G = minimum(_CM.nclusters(k))
-
-    # G/(G-1) adjustment - only for CR1, CR2, CR3
-    G_adj = k isa _CM.CR0 ? 1.0 : G / (G - 1)
-
-    # Compute K for (n-1)/(n-K) adjustment using K.fixef = "nonnested"
-    # K = k (non-FE params) + FE DOF for FE not nested in cluster
-    k_params = dof(m)
-    k_fe_nonnested = _compute_nonnested_fe_dof_iv(m, cluster_groups)
-
-    # Account for intercept absorbed by FE (Stata/fixest behavior)
-    # When FE absorbs an intercept, it should be counted in K
-    k_fe_intercept = (has_fe(m) && !model_hasintercept(m)) ? 1 : 0
-
-    K = k_params + k_fe_nonnested + k_fe_intercept
-
-    # (n-1)/(n-K) adjustment
-    K_adj = (n - 1) / (n - K)
-
-    return convert(Float64, n * G_adj * K_adj)
-end
-
-"""
-    _compute_nonnested_fe_dof_iv(m::IVEstimator, cluster_groups)
-
-Compute the DOF for fixed effects that are NOT nested in the cluster variable(s).
-
-A fixed effect is "nested" in a cluster if every FE group is contained within
-exactly one cluster group (fixest behavior). When FE is nested, it doesn't add
-information beyond the clustering and shouldn't be counted in the K adjustment.
-
-Returns 0 if all FE are nested in the clustering, or the sum of ngroups for
-non-nested FEs.
-"""
-function _compute_nonnested_fe_dof_iv(m::IVEstimator, cluster_groups)
-    # If no fixed effects, return 0
-    dof_fes(m) == 0 && return 0
-
-    # Get FE info from postestimation data
+function _fe_structure(m::IVEstimator)
     pe = m.postestimation
-    isnothing(pe) && return 0
-
-    fe_names = pe.fe_names
-    isempty(fe_names) && return 0
-
-    fe_groups = pe.fe_groups
-    ngroups = pe.ngroups
-
-    # Fallback if fe_groups not stored
-    if isempty(fe_groups)
-        return _compute_nonnested_fe_dof_by_name_iv(m, cluster_groups)
-    end
-
-    # Extract cluster refs from the CR estimator's grouping objects
-    cluster_refs_list = [_CM.groups(g) for g in cluster_groups]
-
-    k_fe_nonnested = 0
-    for (i, fe_name) in enumerate(fe_names)
-        # A FE is nested if it's nested in ANY cluster dimension
-        is_nested = any(crefs -> _isnested_groups_iv(fe_groups[i], crefs, ngroups[i]),
-            cluster_refs_list)
-        if !is_nested
-            k_fe_nonnested += ngroups[i]
-        end
-    end
-
-    return k_fe_nonnested
-end
-
-"""
-    _isnested_groups_iv(fe_refs::Vector{Int}, cluster_refs::Vector{Int}, n_fe_groups::Int) -> Bool
-
-Check if fixed effect groups are nested within cluster groups for IV models.
-
-A FE is nested in a cluster if every FE group belongs to exactly one cluster group.
-This is the fixest definition of nesting.
-"""
-function _isnested_groups_iv(fe_refs::Vector{Int}, cluster_refs::Vector{Int}, n_fe_groups::Int)
-    entries = zeros(Int, n_fe_groups)
-    @inbounds for i in eachindex(fe_refs, cluster_refs)
-        feref, cref = fe_refs[i], cluster_refs[i]
-        if entries[feref] == 0
-            entries[feref] = cref
-        elseif entries[feref] != cref
-            return false
-        end
-    end
-    return true
-end
-
-"""
-    _compute_nonnested_fe_dof_by_name_iv(m::IVEstimator, cluster_groups)
-
-Fallback nesting detection using name-matching heuristic for IV models.
-Used when fe_groups are not available.
-
-FE is considered nested if its name matches one of the cluster names.
-"""
-function _compute_nonnested_fe_dof_by_name_iv(m::IVEstimator, cluster_groups)
-    pe = m.postestimation
-    isnothing(pe) && return 0
-
-    fe_names = pe.fe_names
-    ngroups = pe.ngroups
-    cluster_names = keys(pe.cluster_vars)
-
-    k_fe_nonnested = 0
-    for (i, fe_name) in enumerate(fe_names)
-        is_nested = fe_name in cluster_names
-        if !is_nested
-            k_fe_nonnested += ngroups[i]
-        end
-    end
-
-    return k_fe_nonnested
+    return (; names = pe.fe_names, groups = pe.fe_groups, ngroups = pe.ngroups,
+        cluster_names = keys(pe.cluster_vars))
 end
 
 # The stored cluster vectors for the column names of `k`; see `_resolve_clusters`.
@@ -948,7 +788,7 @@ function recompute_first_stage_fstat(m::IVEstimator{T}, vcov_type) where {T}
 
     return compute_per_endogenous_fstats(
         fsd.Xendo_res, fsd.Z_res, fsd.Pi,
-        resolved_vcov, nobs(m), dof(m), dof_fes_val;
+        resolved_vcov, dof_fes_val;
         Xendo_orig = fsd.Xendo_orig,
         newZ = fsd.newZ
     )
@@ -1788,18 +1628,16 @@ end
 @noinline residualadjustment(k::_CM.CR0, m::IVMatrixEstimator) = 1.0
 @noinline residualadjustment(k::_CM.CR1, m::IVMatrixEstimator) = 1.0
 
-# Cluster-robust estimators on a matrix-based IV model: CR0, and the CR0 meat for
-# `aVar(CR1(...), m)`. `vcov` applies no cluster correction here, so CR1 there, and the
-# leverage-adjusted CR2/CR3 anywhere, are rejected rather than reported as CR0.
+# A matrix-based IV model has no leverage-adjusted cluster residuals, so CR2/CR3 are
+# rejected rather than reported as CR0.
 _check_ivmatrix_cr(k, f) = nothing
 _check_ivmatrix_cr(k::_CM.CachedCR, f) = _check_ivmatrix_cr(_CM.estimator(k), f)
 _check_ivmatrix_cr(k::Union{_CM.CR2, _CM.CR3}, f) = _ivmatrix_cr_error(k, f)
-_check_ivmatrix_cr(k::_CM.CR1, f) = f === vcov ? _ivmatrix_cr_error(k, f) : nothing
 
 function _ivmatrix_cr_error(k, f)
     throw(ArgumentError(
         "$f with $(nameof(typeof(k))) is not implemented for IV models fitted from " *
-        "matrices; use CR0, or fit the model with a formula."))
+        "matrices; use CR0 or CR1, or fit the model with a formula."))
 end
 
 function _regress_aVar(k::_CM.CR, m::IVMatrixEstimator; demean = false, prewhite = false,
@@ -1819,11 +1657,9 @@ function _regress_aVar(k, m::IVMatrixEstimator; demean = false, prewhite = false
     X_hat = m.postestimation.X_hat
     resid = m.postestimation.residuals
 
-    u = residualadjustment(k, m)
     M = X_hat .* resid
-    if !(u isa Number && u == 1.0)
-        M = M .* u
-    end
+    # The adjustment can be Float64 on a Float32 model; the moments keep the model's type.
+    M = M .* eltype(M).(residualadjustment(k, m))
 
     # Bandwidth-selection weights come from the regressor matrix, not the moment
     # matrix: they must give the intercept weight 0, and the intercept column of
@@ -1848,9 +1684,8 @@ function _regress_vcov(ve, m::IVMatrixEstimator{T}; dofadjust = true, demean = f
 
     _check_ivmatrix_cr(ve, vcov)
 
-    # Sandwich: V = scale * B * A * B
     A = _regress_aVar(ve, m; demean, prewhite)
-    scale = convert(T, n)
+    scale = T(n * _finite_sample_factor(ve, m, dofadjust))
 
     Σ = scale .* B * A * B
     return _wrap_vcov(Symmetric(Σ), ve, A)
@@ -2001,7 +1836,7 @@ function first_stage(m::IVMatrixEstimator{T};
     F_robust,
     p_robust = compute_per_endogenous_fstats(
         Xendo_res, Z_res, Pi,
-        m.vcov_estimator, S, k_total, 0;
+        m.vcov_estimator, 0;
         Xendo_orig = Xendo,
         newZ = Z
     )
