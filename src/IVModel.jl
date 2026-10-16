@@ -740,7 +740,8 @@ function recompute_first_stage_fstat(m::IVEstimator{T}, vcov_type) where {T}
     fsd = pe.first_stage_data
     dof_fes_val = dof_fes(m)
 
-    resolved_vcov = _resolve_clusters(vcov_type, m)
+    # A CachedCR's buffers are sized for the second-stage moments, not the first-stage ones.
+    resolved_vcov = _uncached(_resolve_clusters(vcov_type, m))
 
     return compute_per_endogenous_fstats(
         fsd.Xendo_res, fsd.Z_res, fsd.Pi,
@@ -749,6 +750,41 @@ function recompute_first_stage_fstat(m::IVEstimator{T}, vcov_type) where {T}
         newZ = fsd.newZ
     )
 end
+
+"""
+    recompute_kp_fstat(m::IVEstimator, k) -> (F_kp, p_kp)
+
+Kleibergen-Paap rk Wald F statistic of `m` and its p-value with the variance estimator
+`k`. Both are `NaN` when the statistic does not support `k` (see `_kp_supported`). A
+model without stored first-stage data keeps its statistic.
+"""
+function recompute_kp_fstat(m::IVEstimator{T}, k) where {T}
+    pe = m.postestimation
+    (isnothing(pe) || !has_first_stage_data(pe.first_stage_data)) && return m.F_kp, m.p_kp
+    _kp_supported(k) || return T(NaN), T(NaN)
+    fsd = pe.first_stage_data
+    k = _resolve_clusters(k, m)
+    return compute_first_stage_fstat(
+        fsd.Xendo_res, fsd.Z_res, fsd.Pi, k, _kp_factor(k, _FirstStage(m)))
+end
+
+# The first-stage regression of `m`: the endogenous regressors on the exogenous
+# regressors and the excluded instruments, with the absorbed fixed effects of `m`.
+struct _FirstStage{M}
+    m::M
+end
+StatsAPI.nobs(f::_FirstStage) = nobs(f.m)
+StatsAPI.dof_residual(f::_FirstStage) = last(first_stage_df(f.m))
+function _cluster_dof(k, f::_FirstStage)
+    fsd = f.m.postestimation.first_stage_data
+    return _cluster_dof(k, f.m) - sum(_CM.mask(f.m)) + fsd.n_exo + size(fsd.Z_res, 2)
+end
+
+# The factor `c` of `ranktest`: `vcov`'s finite-sample factor, with n / dof_residual for
+# HR1, which `vcov` applies as a residual adjustment, and for Uncorrelated, whose σ² is
+# RSS / dof_residual.
+_kp_factor(k, f::_FirstStage) = _finite_sample_factor(k, f, true)
+_kp_factor(k::Union{_CM.HR1, _CM.Uncorrelated}, f::_FirstStage) = nobs(f) / dof_residual(f)
 
 """
     first_stage_df(m::IVEstimator)
@@ -781,6 +817,7 @@ Create a new model with a different variance-covariance estimator.
 
 Returns a new `IVEstimator` with the same underlying data but
 precomputed vcov statistics and recomputed first-stage diagnostics
+(the robust first-stage F statistics and the Kleibergen-Paap statistic)
 using the specified variance estimator. The vcov estimator is
 deep-copied to avoid aliasing issues.
 
@@ -809,6 +846,7 @@ function Base.:+(m::IVEstimator{T, E, V1, P}, v::VcovSpec{V2}) where {T, E, V1, 
 
     # Recompute robust first-stage F with this vcov type
     F_first_stage_robust, p_first_stage_robust = recompute_first_stage_fstat(m, v.source)
+    F_kp, p_kp = recompute_kp_fstat(m, v.source)
 
     # Return new IVEstimator with same data but different vcov type
     return IVEstimator{T, E, V2, P, typeof(vcov_mat)}(
@@ -824,7 +862,7 @@ function Base.:+(m::IVEstimator{T, E, V1, P}, v::VcovSpec{V2}) where {T, E, V1, 
         F_stat, p_val,
         m.F_first_stage_nonrobust, m.p_first_stage_nonrobust,
         F_first_stage_robust, p_first_stage_robust,
-        m.F_kp, m.p_kp  # KP stat doesn't change with vcov
+        F_kp, p_kp
     )
 end
 
@@ -891,9 +929,18 @@ end
 """
     first_stage_F_KP(m::IVEstimator) -> FirstStageFTest
 
-Joint Kleibergen-Paap rk Wald F-test for under-identification.
+Joint Kleibergen-Paap rk Wald F-test for under-identification, computed with the
+model's variance estimator, `m.vcov_estimator`.
+
+The statistic is defined for `Uncorrelated`, `HC0`, `HC1`, `CR0`, `CR1` (any number of
+cluster dimensions) and the HAC kernels; any other estimator throws an `ArgumentError`.
+The finite-sample factor is that of `vcov` applied to the first-stage regression
+(`n / dof_residual` for `HC1` and the HAC kernels, `G/(G−1)·(n−1)/(n−K)` for `CR1`, with
+K the first-stage coefficients). A HAC kernel with an automatic bandwidth selects it from
+the first-stage moments.
 """
 function first_stage_F_KP(m::IVEstimator{T}) where {T}
+    _check_kp_estimator(m.vcov_estimator)
     pe = m.postestimation
     endo_names = if !isnothing(pe) && has_first_stage_data(pe.first_stage_data)
         pe.first_stage_data.endogenous_names

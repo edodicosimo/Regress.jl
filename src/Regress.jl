@@ -13,6 +13,7 @@ using DataFrames: DataFrames, AsTable, DataFrame, Not, combine, completecases,
 using FixedEffects: FixedEffects, AbstractFixedEffectSolver, FixedEffect,
                     solve_coefficients!, solve_residuals!
 using LinearAlgebra: LinearAlgebra, BLAS, Cholesky, ColumnNorm, Hermitian, I,
+                     LAPACKException, PosDefException, SingularException,
                      Symmetric, UpperTriangular, cholesky, cholesky!, diag,
                      diagm, dot, eigen, eigvals, issuccess, mul!, pinv, qr,
                      rank, rmul!, svd, tr

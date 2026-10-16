@@ -160,3 +160,115 @@ end
     @test fsi isa AbstractTest
     @test pvalue(fsi) == fsi.p_robust
 end
+
+@testitem "Kleibergen-Paap statistic follows the variance estimator" tags = [
+    :iv, :validation] begin
+    using Regress
+    using DataFrames, CSV, LinearAlgebra
+    using Regress: fe
+
+    df = DataFrame(CSV.File(joinpath(dirname(pathof(Regress)), "../dataset/Cigar.csv")))
+    n = nrow(df)
+    kp(m, k) = first_stage_F_KP(m + vcov(k))
+
+    # With one endogenous regressor the KP rk Wald F is the first-stage Wald F of the
+    # excluded instruments. References: R fixest 0.14.1
+    # `fitstat(feols(Sales ~ NDI | Price ~ Pimin + Pop, df, vcov = v), ~ivwald1)`.
+    m = Regress.iv(Regress.TSLS(), df, @formula(Sales ~ NDI + (Price ~ Pimin + Pop)),
+        save_cluster = [:State, :Year])
+    for (k, ref) in ((Uncorrelated(), 2622.461860257), (HC1(), 1464.27486829565),
+        (CR1(:State), 280.848595798773), (CR1(:State, :Year), 280.440867252914))
+        fs = kp(m, k)
+        @test fs.stat ≈ ref rtol = 1e-10
+        @test fs.vcov_estimator == k
+        @test fs.p ≈ Regress.chisqccdf(2, 2 * fs.stat)
+    end
+    # The statistic computed at fit time is the HC1 one.
+    @test first_stage_F_KP(m).stat ≈ kp(m, HC1()).stat rtol = 1e-12
+    @test first_stage_F_KP(m).vcov_estimator == HC1()
+    # LIML shares the first stage.
+    ml = Regress.iv(Regress.LIML(), df, @formula(Sales ~ NDI + (Price ~ Pimin + Pop)), save_cluster = :State)
+    @test kp(ml, CR1(:State)).stat ≈ 280.848595798773 rtol = 1e-10
+    # The HAC kernels and CachedCR equal the robust first-stage F, computed from the full
+    # first-stage regression rather than from the partialled-out moments.
+    for k in (Bartlett(3), Parzen(5), CachedCR(CR1(:State), m))
+        @test kp(m, k).stat ≈ first_stage_F_robust(m + vcov(k)).stat rtol = 1e-10
+    end
+
+    # Absorbed fixed effect, with clusters nested in it (State) and not (Year).
+    # References: fixest `feols(Sales ~ NDI | State | Price ~ Pimin + Pop, ...)`.
+    mf = Regress.iv(
+        Regress.TSLS(), df, @formula(Sales ~ NDI + (Price ~ Pimin + Pop) + fe(State)),
+        save_cluster = [:State, :Year])
+    for (k, ref) in ((Uncorrelated(), 2776.23219867604), (HC1(), 1435.11064681269),
+        (CR1(:State), 332.781459426826), (CR1(:Year), 1146.43018399374))
+        @test kp(mf, k).stat ≈ ref rtol = 1e-10
+    end
+
+    # Two endogenous regressors, by hand: θ = F Π G⁻¹ with F'F = Z̃'Z̃ and G'G = V'V, the
+    # instruments Z̃ and first-stage residuals V with the intercept partialled out, and
+    # the KP statistic for rank(Π) = 1 with meat S of the moments Z̃ ⊗ V.
+    m2 = Regress.iv(Regress.TSLS(), df, @formula(Sales ~ (Price + NDI ~ Pimin + Pop)),
+        save_cluster = [:State, :Year])
+    Z = Matrix(df[:, [:Pimin, :Pop]])
+    X = Matrix(df[:, [:Price, :NDI]])
+    W = [ones(n) Z]
+    V = X - W * (W \ X)
+    Zt = Z .- sum(Z; dims = 1) ./ n
+    Π = Zt \ X
+    function kp_by_hand(S)
+        F = cholesky(Symmetric(Zt' * Zt)).U
+        G = cholesky(Symmetric(V' * V)).U
+        θ = F * Π / G
+        U, _, Vθ = svd(θ; full = true)
+        Vt = Vθ'
+        u = U[2:2, 2:2]
+        a = U[:, 2:2] * (u \ sqrt(u * u'))
+        b = sqrt(Vt[2, 2]^2) * (Vt[2, 2] \ Vt[1:2, 2]')
+        L = kron(b, a')
+        λ = L * vec(θ)
+        K = kron(G, F)'
+        Σ = L * (K \ (K \ S)') * L'
+        return only(λ' * (Σ \ λ)) / 2
+    end
+    M = hcat(Zt .* V[:, 1], Zt .* V[:, 2])
+    cluster_meat(g) = (s = [sum(M[g .== c, :]; dims = 1) for c in unique(g)];
+        sum(si' * si for si in s))
+    K = 3  # first-stage coefficients: intercept, Pimin, Pop
+    G = length(unique(df.State))
+    S1 = G / (G - 1) * (n - 1) / (n - K) * cluster_meat(df.State)
+    @test kp(m2, CR1(:State)).stat ≈ kp_by_hand(S1) rtol = 1e-10
+    Gmin = min(G, length(unique(df.Year)))
+    S2 = Gmin / (Gmin - 1) * (n - 1) / (n - K) *
+         (cluster_meat(df.State) + cluster_meat(df.Year) -
+          cluster_meat(string.(df.State, "-", df.Year)))
+    @test kp(m2, CR1(:State, :Year)).stat ≈ kp_by_hand(S2) rtol = 1e-10
+    @test kp(m2, HC1()).stat ≈ kp_by_hand(n / (n - K) * (M' * M)) rtol = 1e-10
+    # fixest `fitstat(feols(Sales ~ 1 | Price + NDI ~ Pimin + Pop, df, vcov = "hetero"),
+    # ~kpr)` applies n/(n−K) twice: once in the meat and again to the variance.
+    @test kp(m2, HC1()).stat ≈ 16.872201216016 * n / (n - K) rtol = 1e-10
+
+    # Estimators for which the statistic is not defined: `+` succeeds, and asking for the
+    # statistic throws.
+    for k in (HC3(), CR2(:State), DriscollKraay(Bartlett(3), df.Year, df.State))
+        mk = m + vcov(k)
+        @test isnan(mk.F_kp)
+        @test_throws "The Kleibergen-Paap statistic is not defined for $(nameof(typeof(k)))" first_stage_F_KP(mk)
+    end
+end
+
+@testitem "First-stage statistics propagate unexpected errors" tags = [:iv] begin
+    using Regress
+    using DataFrames, CSV, CovarianceMatrices
+
+    struct NotAnEstimator <: CovarianceMatrices.AbstractAsymptoticVarianceEstimator end
+    Regress._kp_supported(::NotAnEstimator) = true
+
+    df = DataFrame(CSV.File(joinpath(dirname(pathof(Regress)), "../dataset/Cigar.csv")))
+    m = Regress.iv(Regress.TSLS(), df, @formula(Sales ~ NDI + (Price ~ Pimin + Pop)))
+    fsd = m.postestimation.first_stage_data
+    @test_throws MethodError Regress.compute_first_stage_fstat(
+        fsd.Xendo_res, fsd.Z_res, fsd.Pi, NotAnEstimator(), 1.0)
+    @test_throws MethodError Regress._compute_first_stage_fstats_via_ols(
+        fsd.newZ, fsd.Xendo_orig, 2, NotAnEstimator(), 0)
+end

@@ -62,7 +62,25 @@
 - **`prewhite = true` with a cluster estimator throws an `ArgumentError`** on
   OLS models. With a single cluster dimension it was ignored.
 
+- **The Kleibergen-Paap statistic follows the model's variance estimator.**
+  `first_stage_F_KP(m + vcov(k))` is computed with `k` for `Uncorrelated`, `HC0`,
+  `HC1`, `CR0`, `CR1` (any number of cluster dimensions) and the HAC kernels,
+  with the finite-sample factor of `vcov` applied to the first-stage regression.
+  For any other estimator `+` stores `NaN` and `first_stage_F_KP` throws an
+  `ArgumentError`. The statistic was computed once with `HC1` and labeled with
+  whatever estimator `+` set. Its robust meat also used the moments
+  `Z̃ ⊗ (V − Z̃Π)` in place of `Z̃ ⊗ V`, with `V` the first-stage residuals: on
+  `Sales ~ NDI + (Price ~ Pimin)` (Cigar) it was 244.16 against 2885.36. With one
+  endogenous regressor the statistic now equals the first-stage Wald F
+  (`first_stage_F_robust`, fixest `ivwald1`) under the same estimator.
+
 ### Fixed
+
+- The first-stage statistics no longer turn every exception into `NaN`. Only a
+  failed factorization (`PosDefException`, `SingularException`,
+  `LAPACKException`) gives `NaN`; other errors propagate. `m + vcov(CachedCR(...))`
+  on an over-identified IV model set the robust first-stage F to `NaN` this way;
+  it is now computed.
 
 - `UniformSmoother` and `TriangularSmoother` work on every model type, with the
   `n/(n-K)` factor of the other long-run estimators. They threw a `MethodError`.

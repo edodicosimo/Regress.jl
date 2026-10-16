@@ -295,7 +295,7 @@ function fit_kclass_estimator(
         dof_fes_local = sum(nunique(fe) for fe in subfes; init = 0)
 
         fstats = _iv_first_stage_fstats_standard(
-            Xendo, newZ, Pi, XexoXexo, XexoZ, ZZ, X,
+            Xendo, newZ, Pi, XexoXexo, XexoZ, ZZ,
             nobs_eff, dof_fes_local, endo_names_final,
             k_exo_final, data_prep.has_intercept)
 

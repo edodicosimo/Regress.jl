@@ -241,7 +241,7 @@ Compute first-stage F-statistics for standard IV.
 function _iv_first_stage_fstats_standard(
         Xendo::Matrix{T}, newZ::Matrix{T}, Pi::Matrix{T},
         XexoXexo::Symmetric{T}, XexoZ::Matrix{T}, ZZ::Symmetric{T},
-        X::Matrix{T}, nobs::Int, dof_fes::Int,
+        nobs::Int, dof_fes::Int,
         endo_names::Vector{String}, k_exo::Int, has_intercept::Bool
 ) where {T}
     n = size(Xendo, 1)
@@ -269,11 +269,12 @@ function _iv_first_stage_fstats_standard(
     k_endo = size(Xendo, 2)
 
     # Compute joint first-stage F-statistic (Kleibergen-Paap)
+    # HR1's factor n / dof_residual of the first-stage regression
     F_kp,
     p_kp = compute_first_stage_fstat(
         Xendo_res, Z_res, Pip,
         CovarianceMatrices.HR1(),
-        nobs, size(X, 2), dof_fes
+        nobs / max(1, nobs - size(newZ, 2) - dof_fes)
     )
 
     # Compute per-endogenous F-statistics
@@ -626,7 +627,7 @@ function fit_tsls(@nospecialize(df),
                 endo_names_final, data_prep.has_intercept)
         else
             fstats = _iv_first_stage_fstats_standard(
-                Xendo, newZ, Pi, XexoXexo, XexoZ, ZZ, X,
+                Xendo, newZ, Pi, XexoXexo, XexoZ, ZZ,
                 nobs_eff, dof_fes_local, endo_names_final,
                 k_exo_final, data_prep.has_intercept)
         end
