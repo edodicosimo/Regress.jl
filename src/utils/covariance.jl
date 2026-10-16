@@ -360,8 +360,12 @@ end
 `aVar` of the adjusted moment matrix `M`, computed with `_matrix_estimator(k)` and
 recorded as an estimate of `k`.
 """
-function _moment_aVar(k, M; kwargs...)
-    A = aVar(_matrix_estimator(k), M; kwargs...)
+function _moment_aVar(k, M; prewhite = false, kwargs...)
+    # Checked here so that the error names `k` rather than `_matrix_estimator(k)`.
+    prewhite && k isa Union{CM.HR, CM.CR} &&
+        throw(ArgumentError(
+            "`prewhite = true` is not supported by $(nameof(typeof(k))), which does not prewhiten."))
+    A = aVar(_matrix_estimator(k), M; prewhite, kwargs...)
     return CovarianceMatrix(parent(A), k, CM.information(A))
 end
 
@@ -376,17 +380,21 @@ function CovarianceMatrices.momentmatrix(m::OLSEstimator)
     return modelmatrix(m) .* CM.momentresiduals(m)
 end
 
-function CM.aVar(
-        k::K,
-        m::OLSEstimator;
-        demean = false,
-        prewhite = false,
-        scale = true,
-        kwargs...
-) where {K <: CM.AbstractAsymptoticVarianceEstimator}
-    # Compute moment matrix directly: X .* (y - mu) .* u in single fused broadcast
-    # This avoids separate allocation for residuals vector
-    # Note: y and mu are already weighted if model has weights
+##############################################################################
+##
+## Entry points: vcov, stderror and aVar on Regress models
+##
+## `vcov(k, m)`, `stderror(k, m)` and `aVar(k, m)` on the four model types
+## (`OLSEstimator`, `OLSMatrixEstimator`, `IVEstimator`, `IVMatrixEstimator`) are
+## defined once, at the end of this file. Each checks the keywords, replaces
+## clusters named by column with the model's stored cluster data, and calls
+## `_regress_vcov` or `_regress_aVar`, whose methods hold the estimator-specific code.
+##
+##############################################################################
+
+# The moment matrix of an OLS model is `X .* (y - mu)`; `y` and `mu` are already
+# weighted for a weighted model.
+function _regress_aVar(k, m::OLSModel; demean = false, prewhite = false, scale = true)
     u = residualadjustment(k, m)
     X = modelmatrix(m)
     y = m.rr.y
@@ -399,29 +407,15 @@ function CM.aVar(
     return _moment_aVar(k, mm; demean, prewhite, scale, weights = kw)
 end
 
-# Disambiguating method for cluster-robust estimators (CR <: AbstractAsymptoticVarianceEstimator)
-# This resolves ambiguity between:
-#   - aVar(k::K, m::OLSEstimator) where K <: AbstractAsymptoticVarianceEstimator (above)
-#   - aVar(k::CR, m::RegressionModel) from CovarianceMatrices.jl
-function CM.aVar(
-        k::K,
-        m::OLSEstimator;
-        demean = false,
-        prewhite = false,
-        scale = true,
-        kwargs...
-) where {K <: CM.CR}
-    return _ols_cr_aVar(k, m; demean, prewhite, scale)
-end
-
-function _ols_cr_aVar(k::K, m::OLSModel; demean, prewhite, scale) where {K <: CM.CR}
+function _regress_aVar(k::K, m::OLSModel; demean = false, prewhite = false,
+        scale = true) where {K <: CM.CR}
     X = modelmatrix(m)
     y = m.rr.y
     mu = m.rr.mu
 
-    # Optimization: For single-cluster CR0/CR1, use direct aggregation
-    # This avoids allocating an n×k moment matrix
-    if length(CM.clusters(k)) == 1 && (K <: Union{CM.CR0, CM.CR1})
+    # Single-cluster CR0/CR1 aggregate the scores by cluster directly, without
+    # allocating the n×k moment matrix. `demean` and `prewhite` need the moment matrix.
+    if length(CM.clusters(k)) == 1 && (K <: Union{CM.CR0, CM.CR1}) && !demean && !prewhite
         clustering = only(CM.clusters(k))
         # Direct aggregation: only allocate G×k instead of n×k
         # Pass scale parameter to match CovarianceMatrices.aVar behavior
@@ -433,6 +427,8 @@ function _ols_cr_aVar(k::K, m::OLSModel; demean, prewhite, scale) where {K <: CM
     # adjustment. CovarianceMatrices computes this from the regression-model protocol
     # (`modelmatrix`, `momentresiduals`, `mask` and the empty `weights` above).
     if K <: Union{CM.CR2, CM.CR3}
+        demean && throw(ArgumentError(
+            "aVar with $(nameof(K)) on an OLS model does not support `demean = true`"))
         return invoke(CM.aVar, Tuple{CM.CR, RegressionModel}, k, m; prewhite, scale)
     end
 
@@ -443,118 +439,41 @@ end
 
 ##############################################################################
 ##
-## Cluster-Robust Variance Estimation
+## Clusters named by column
 ##
-## Standard CovarianceMatrices.jl API (with actual data vectors):
-##   vcov(CR1(cluster_vec), model)
-##   stderror(CR1(cluster_vec), model)
-##
-## Symbol-based API (looks up stored cluster variables):
-##   vcov(CR1(:StateID), model)           # single cluster
-##   vcov(CR1(:StateID, :YearID), model)  # multi-way clustering
+## `CR1(:firm)`, `Cluster(:firm, :year)` and the like name the clusters by column.
+## A model fitted from a formula stores the cluster columns given to `save_cluster`,
+## and the entry points replace the names with that data before any computation.
 ##
 ##############################################################################
 
 """
-    stderror(ve::CovarianceMatrices.AbstractAsymptoticVarianceEstimator, m::OLSEstimator)
+    _resolve_clusters(k, m)
 
-Compute standard errors using a specified variance estimator.
-
-# Examples
-```julia
-# Heteroskedasticity-robust
-stderror(HC1(), model)
-
-# Cluster-robust (standard CovarianceMatrices.jl API)
-stderror(CR1(cluster_vec), model)
-
-# Two-way clustering
-stderror(CR1((cluster1, cluster2)), model)
-```
+`k` with clusters named by column replaced by the cluster data stored in `m`, as an
+estimator of the same type. Any other `k` is returned unchanged.
 """
-function StatsBase.stderror(ve::CovarianceMatrices.AbstractAsymptoticVarianceEstimator, m::OLSEstimator)
-    return sqrt.(diag(vcov(ve, m)))
+_resolve_clusters(k, m) = k
+for E in (:CR0, :CR1, :CR2, :CR3, :Cluster)
+    @eval function _resolve_clusters(k::CM.$E{<:Tuple{Vararg{Symbol}}}, m)
+        return CM.$E(_cluster_vectors(k, m))
+    end
 end
 
-##############################################################################
-##
-## Symbol-Based Cluster-Robust Variance API
-##
-## When CR types are constructed with Symbol(s) instead of data vectors,
-## these methods look up the cluster data from the model's stored clusters.
-##
-## Usage:
-##   vcov(CR1(:StateID), model)           # single cluster
-##   vcov(CR1(:StateID, :YearID), model)  # multi-way clustering
-##
-##############################################################################
-
-"""
-    _lookup_cluster_vecs(cluster_syms::Tuple{Vararg{Symbol}}, m::OLSEstimator)
-
-Look up cluster vectors from stored cluster data in the model.
-Returns a tuple of vectors corresponding to the requested cluster symbols.
-"""
-function _lookup_cluster_vecs(cluster_syms::Tuple{Vararg{Symbol}}, m::OLSEstimator)
-    return Tuple(begin
-                     haskey(m.fes.clusters, name) || _cluster_not_found_error(name, m)
-                     m.fes.clusters[name]
-                 end
-    for name in cluster_syms)
+# The stored cluster vectors for the column names of `k`.
+function _cluster_vectors(k, m::OLSEstimator)
+    return map(CM.clusters(k)) do name
+        haskey(m.fes.clusters, name) || _cluster_not_found_error(name, m)
+        m.fes.clusters[name]
+    end
 end
 
-"""
-    vcov(v::CM.CR0{T}, m::OLSEstimator) where T<:Tuple{Vararg{Symbol}}
-
-Compute cluster-robust variance with CR0 estimator using stored cluster variable(s).
-
-# Examples
-```julia
-model = ols(df, @formula(y ~ x), save_cluster = :firm_id)
-vcov(CR0(:firm_id), model)
-vcov(CR0(:firm_id, :year), model)  # multi-way
-```
-"""
-function CM.vcov(v::CM.CR0{T}, m::OLSEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs(CM.clusters(v), m)
-    return vcov(CM.CR0(cluster_vecs), m)
-end
-
-"""
-    vcov(v::CM.CR1{T}, m::OLSEstimator) where T<:Tuple{Vararg{Symbol}}
-
-Compute cluster-robust variance with CR1 estimator using stored cluster variable(s).
-
-# Examples
-```julia
-model = ols(df, @formula(y ~ x), save_cluster = :firm_id)
-vcov(CR1(:firm_id), model)
-vcov(CR1(:firm_id, :year), model)  # multi-way
-```
-"""
-function CM.vcov(v::CM.CR1{T}, m::OLSEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs(CM.clusters(v), m)
-    return vcov(CM.CR1(cluster_vecs), m)
-end
-
-"""
-    vcov(v::CM.CR2{T}, m::OLSEstimator) where T<:Tuple{Vararg{Symbol}}
-
-Compute cluster-robust variance with CR2 (leverage-adjusted) estimator using stored cluster variable(s).
-"""
-function CM.vcov(v::CM.CR2{T}, m::OLSEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs(CM.clusters(v), m)
-    return vcov(CM.CR2(cluster_vecs), m)
-end
-
-"""
-    vcov(v::CM.CR3{T}, m::OLSEstimator) where T<:Tuple{Vararg{Symbol}}
-
-Compute cluster-robust variance with CR3 (squared leverage) estimator using stored cluster variable(s).
-"""
-function CM.vcov(v::CM.CR3{T}, m::OLSEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs(CM.clusters(v), m)
-    return vcov(CM.CR3(cluster_vecs), m)
+function _cluster_vectors(k, m::Union{OLSMatrixEstimator, IVMatrixEstimator})
+    E = nameof(typeof(k))
+    throw(ArgumentError(
+        "$(sprint(show, k)) names its clusters by column, but a model fitted from " *
+        "matrices stores no cluster data. Pass the group identifiers instead, " *
+        "e.g. `$E(groups)`."))
 end
 
 ##############################################################################
@@ -607,17 +526,8 @@ See also: [`CachedCR`](@ref CovarianceMatrices.CachedCR)
 """
 function CM.CachedCR(cr::CM.CR, m::Union{OLSModel, IVEstimator, IVMatrixEstimator})
     _check_cached_estimator(cr)
-    return CM.CachedCR(_resolve_cached_clusters(cr, m), _cr_moment_ncols(m))
+    return CM.CachedCR(_resolve_clusters(cr, m), _cr_moment_ncols(m))
 end
-
-_resolve_cached_clusters(k, m) = k
-function _resolve_cached_clusters(k::CM.CR0{<:Tuple{Vararg{Symbol}}}, m::OLSEstimator)
-    return CM.CR0(_lookup_cluster_vecs(CM.clusters(k), m))
-end
-function _resolve_cached_clusters(k::CM.CR1{<:Tuple{Vararg{Symbol}}}, m::OLSEstimator)
-    return CM.CR1(_lookup_cluster_vecs(CM.clusters(k), m))
-end
-_resolve_cached_clusters(k, m::IVEstimator) = _resolve_cr_vcov(k, m)
 
 # Columns of the moment matrix that the model's cluster-robust `aVar` forms. For OLS it
 # keeps the collinear columns; for IV it holds only the estimable ones.
@@ -653,9 +563,6 @@ function _check_cache(k::CM.CachedCR{<:CM.CR, <:CM.CRModelCache})
         "and its cache holds that model's adjustments. Build it from the Regress model " *
         "with CachedCR(estimator, model)."))
 end
-
-# Residual adjustment for CachedCR (same as CR0/CR1 - no adjustment)
-@noinline residualadjustment(k::CM.CachedCR, r::OLSModel) = 1.0
 
 ##############################################################################
 ##
@@ -903,8 +810,9 @@ function _compute_nonnested_fe_dof_by_name(m::OLSEstimator, cluster_groups)
     return k_fe_nonnested
 end
 
-function CM.vcov(k::CM.AbstractAsymptoticVarianceEstimator, m::OLSEstimator; dofadjust = true, kwargs...)
-    A = aVar(k, m; kwargs...)
+function _regress_vcov(k, m::OLSEstimator; dofadjust = true, demean = false,
+        prewhite = false)
+    A = _regress_aVar(k, m; demean, prewhite)
     n = nobs(m)
     B = invchol(m.pp)
     basis_coef = m.basis_coef
@@ -937,7 +845,7 @@ function CM.vcov(k::CM.AbstractAsymptoticVarianceEstimator, m::OLSEstimator; dof
         #   - FE nested in cluster variable are NOT counted in K
         #   - FE NOT nested in cluster variable ARE counted in K
         _cluster_robust_scale(ku, m, n)
-    elseif ku isa CM.Correlated
+    elseif ku isa CM.Correlated && dofadjust
         # Correlated (HAC, EWC, etc.): Apply DOF correction n/(n-p)
         # p_total includes both model parameters and fixed effects DOF
         p_total = dof(m) + dof_fes(m)
@@ -974,32 +882,16 @@ function CM.vcov(k::CM.AbstractAsymptoticVarianceEstimator, m::OLSEstimator; dof
     return _wrap_vcov(Σ, k, A)
 end
 
-"""
-    vcov(k::DriscollKraay, m::OLSEstimator; kwargs...)
-
-Driscoll-Kraay variance for a fitted OLS model, delegating to the
-CovarianceMatrices implementation.
-
-The estimator carries its own time and unit indices and its small-sample
-correction (`DriscollKraay(...; correction = :HC1)`), so the model supplies
-nothing beyond the standard interface.
-
-Driscoll-Kraay scales by the number of time periods, not by the number of
-observations, so this must not route through the sandwich above: the two
-divisors differ by a factor of roughly `T / n`.
-"""
-function CM.vcov(k::CM.DriscollKraay, m::OLSEstimator; kwargs...)
-    Σ = invoke(CM.vcov, Tuple{CM.DriscollKraay, RegressionModel}, k, m; kwargs...)
-    return _wrap_vcov(Σ, k, nothing)
-end
-
-# Resolves the ambiguity with `aVar(::DriscollKraay, ::RegressionModel)` in
-# CovarianceMatrices: the meat comes from this package's moment matrix, like every
-# other estimator's.
+# Driscoll-Kraay variance, computed by CovarianceMatrices' `vcov` for a
+# `RegressionModel`. The estimator carries its own time and unit indices and its
+# small-sample correction (`DriscollKraay(...; correction = :HC1)`), which
+# `dofadjust = false` leaves out. Driscoll-Kraay scales by the number of time
+# periods, not by the number of observations, so it does not use the sandwich of the
+# other estimators: the two divisors differ by a factor of roughly `T / n`.
 for M in (OLSEstimator, OLSMatrixEstimator)
-    @eval function CM.aVar(k::CM.DriscollKraay, m::$M; kwargs...)
-        return invoke(
-            CM.aVar, Tuple{CM.AbstractAsymptoticVarianceEstimator, $M}, k, m; kwargs...)
+    @eval function _regress_vcov(k::CM.DriscollKraay, m::$M; kwargs...)
+        Σ = invoke(CM.vcov, Tuple{CM.DriscollKraay, RegressionModel}, k, m; kwargs...)
+        return _wrap_vcov(Σ, k, nothing)
     end
 end
 
@@ -1063,39 +955,6 @@ end
 # OLSModel type union (Union{OLSEstimator, OLSMatrixEstimator}) defined earlier
 # in this file, eliminating code duplication.
 
-function CM.aVar(
-        k::K,
-        m::OLSMatrixEstimator;
-        demean = false,
-        prewhite = false,
-        scale = true,
-        kwargs...
-) where {K <: CM.AbstractAsymptoticVarianceEstimator}
-    # Compute moment matrix directly: X .* (y - mu) .* u in single fused broadcast
-    u = residualadjustment(k, m)
-    X = modelmatrix(m)
-    y = m.rr.y
-    mu = m.rr.mu
-    mm = @. X * (y - mu) * u
-    # Bandwidth-selection weights come from the model matrix, not the moment
-    # matrix: they must give the intercept weight 0, and the intercept column of
-    # the moment matrix is not constant. `nothing` for non-HAC estimators.
-    kw = CM.bandwidthweights(k, X)
-    return _moment_aVar(k, mm; demean, prewhite, scale, weights = kw)
-end
-
-# Disambiguating method for cluster-robust estimators
-function CM.aVar(
-        k::K,
-        m::OLSMatrixEstimator;
-        demean = false,
-        prewhite = false,
-        scale = true,
-        kwargs...
-) where {K <: CM.CR}
-    return _ols_cr_aVar(k, m; demean, prewhite, scale)
-end
-
 """
     _wrap_vcov(Σ, estimator, A) -> CovarianceMatrix
 
@@ -1114,17 +973,9 @@ function _wrap_vcov(Σ, estimator, A::CovarianceMatrix)
     return CovarianceMatrix(Σ, estimator, CovarianceMatrices.information(A))
 end
 
-"""
-    stderror(ve::CovarianceMatrices.AbstractAsymptoticVarianceEstimator, m::OLSMatrixEstimator)
-
-Compute standard errors using a specified variance estimator.
-"""
-function StatsBase.stderror(ve::CovarianceMatrices.AbstractAsymptoticVarianceEstimator, m::OLSMatrixEstimator)
-    return sqrt.(diag(vcov(ve, m)))
-end
-
-function CM.vcov(k::CM.AbstractAsymptoticVarianceEstimator, m::OLSMatrixEstimator; dofadjust = true, kwargs...)
-    A = aVar(k, m; kwargs...)
+function _regress_vcov(k, m::OLSMatrixEstimator; dofadjust = true, demean = false,
+        prewhite = false)
+    A = _regress_aVar(k, m; demean, prewhite)
     n = nobs(m)
     B = invchol(m.pp)
     basis_coef = m.basis_coef
@@ -1142,7 +993,7 @@ function CM.vcov(k::CM.AbstractAsymptoticVarianceEstimator, m::OLSMatrixEstimato
         K = dof(m)
         K_adj = (n - 1) / (n - K)
         convert(Float64, n * G_adj * K_adj)
-    elseif k isa CM.Correlated
+    elseif ku isa CM.Correlated && dofadjust
         # Correlated (HAC, EWC, etc.): Apply DOF correction n/(n-p)
         # For matrix estimator, no fixed effects so p = dof(m)
         p = dof(m)
@@ -1167,21 +1018,106 @@ function CM.vcov(k::CM.AbstractAsymptoticVarianceEstimator, m::OLSMatrixEstimato
     return _wrap_vcov(scale .* B * A * B, k, A)
 end
 
-"""
-    vcov(k::DriscollKraay, m::OLSMatrixEstimator; kwargs...)
-
-Driscoll-Kraay variance for a matrix-based OLS model, delegating to the
-CovarianceMatrices implementation. See the `OLSEstimator` method for why the
-sandwich above is not reused.
-"""
-function CM.vcov(k::CM.DriscollKraay, m::OLSMatrixEstimator; kwargs...)
-    Σ = invoke(CM.vcov, Tuple{CM.DriscollKraay, RegressionModel}, k, m; kwargs...)
-    return _wrap_vcov(Σ, k, nothing)
-end
-
 function StatsAPI.confint(ve::CovarianceMatrices.AbstractAsymptoticVarianceEstimator,
         m::OLSMatrixEstimator; level::Real = 0.95)
     scale = tdistinvcdf(StatsAPI.dof_residual(m), 1 - (1 - level) / 2)
     se = CovarianceMatrices.stderror(ve, m)
     hcat(coef(m) - scale * se, coef(m) + scale * se)
+end
+
+##############################################################################
+##
+## Entry points
+##
+##############################################################################
+
+const RegressModel = Union{OLSEstimator, OLSMatrixEstimator, IVEstimator, IVMatrixEstimator}
+
+const _VCOV_KEYWORDS = (:dofadjust, :demean, :prewhite)
+const _AVAR_KEYWORDS = (:demean, :prewhite, :scale)
+
+function _check_keywords(f, k, kwargs, allowed)
+    bad = filter(∉(allowed), collect(keys(kwargs)))
+    isempty(bad) || throw(ArgumentError(
+        "$f($(nameof(typeof(k)))(...), model) does not accept the keyword(s) " *
+        "$(join(bad, ", ")); its keywords are $(join(allowed, ", "))."))
+    return nothing
+end
+
+# `demean` and `prewhite` act on a moment matrix, which the iid variance does not use.
+function _check_iid_keywords(demean, prewhite)
+    (demean || prewhite) && throw(ArgumentError(
+        "`demean` and `prewhite` do not apply to Uncorrelated(), the iid variance"))
+    return nothing
+end
+
+"""
+    vcov(k::AbstractAsymptoticVarianceEstimator, m; dofadjust = true, demean = false, prewhite = false)
+    stderror(k::AbstractAsymptoticVarianceEstimator, m; kwargs...)
+
+Variance-covariance matrix of the coefficients of the Regress model `m` (`OLSEstimator`,
+`OLSMatrixEstimator`, `IVEstimator` or `IVMatrixEstimator`), computed with the estimator
+`k`, as a `CovarianceMatrix`. `stderror` returns the square roots of its diagonal and
+takes the same keywords.
+
+Cluster-robust estimators (`CR0`–`CR3`, `Cluster`) may name their clusters by column,
+as in `CR1(:firm)` or `CR1(:firm, :year)`, on a model fitted from a formula with
+`save_cluster`; the column data stored with the model is used. A model fitted from
+matrices stores no cluster data and needs the group identifiers, as in `CR1(groups)`.
+
+# Keywords
+- `dofadjust`: apply the degrees-of-freedom factor that is not part of the estimator's
+  definition: `n/(n-K)` for the long-run estimators (HAC kernels, EWC, VARHAC and the
+  smoothers), the `correction` of a `DriscollKraay` estimator, and the `n - K` divisor
+  of `Uncorrelated()` (`n` when `false`). The finite-sample factors of `HC1`–`HC5` and
+  `CR0`–`CR3` define those estimators, and `dofadjust` does not change them.
+- `demean`, `prewhite`: passed to `aVar`.
+
+Any other keyword throws an `ArgumentError`.
+
+# Examples
+```julia
+model = ols(df, @formula(y ~ x), save_cluster = :firm)
+vcov(HC3(), model)
+vcov(CR1(:firm), model)
+stderror(Bartlett(5), model; prewhite = true)
+```
+"""
+function CM.vcov(k::CM.AbstractAsymptoticVarianceEstimator, m::RegressModel; kwargs...)
+    _check_keywords(vcov, k, kwargs, _VCOV_KEYWORDS)
+    return _regress_vcov(_resolve_clusters(k, m), m; kwargs...)
+end
+
+# `DriscollKraay` has its own method on a `RegressionModel` in CovarianceMatrices, which
+# explains that a `type` keyword belongs in the estimator.
+function CM.vcov(k::CM.DriscollKraay, m::RegressModel; kwargs...)
+    _check_keywords(vcov, k, kwargs, (_VCOV_KEYWORDS..., :type))
+    return _regress_vcov(k, m; kwargs...)
+end
+
+function StatsBase.stderror(k::CM.AbstractAsymptoticVarianceEstimator, m::RegressModel;
+        kwargs...)
+    _check_keywords(stderror, k, kwargs, _VCOV_KEYWORDS)
+    return sqrt.(diag(vcov(k, m; kwargs...)))
+end
+
+"""
+    aVar(k::AbstractAsymptoticVarianceEstimator, m; demean = false, prewhite = false, scale = true)
+
+Asymptotic variance (the meat of the sandwich) of the moment conditions of the Regress
+model `m`, computed with `k`. Clusters named by column are looked up as in `vcov`.
+`demean`, `prewhite` and `scale` have the meaning they have for `aVar` on a matrix; any
+other keyword throws an `ArgumentError`.
+"""
+function CM.aVar(k::CM.AbstractAsymptoticVarianceEstimator, m::RegressModel; kwargs...)
+    _check_keywords(aVar, k, kwargs, _AVAR_KEYWORDS)
+    return _regress_aVar(_resolve_clusters(k, m), m; kwargs...)
+end
+
+# CovarianceMatrices defines `aVar` methods on a `RegressionModel` for these two.
+for K in (CM.CR, CM.DriscollKraay)
+    @eval function CM.aVar(k::$K, m::RegressModel; kwargs...)
+        _check_keywords(aVar, k, kwargs, _AVAR_KEYWORDS)
+        return _regress_aVar(_resolve_clusters(k, m), m; kwargs...)
+    end
 end

@@ -810,3 +810,75 @@ end
         @test_throws not_implemented aVar(K(df.State), model_iv_mat)
     end
 end
+
+@testitem "vcov entry points on every model type" tags = [:ols, :iv, :vcov, :cluster] begin
+    using Regress, CSV, DataFrames, LinearAlgebra, StatsBase
+    using Regress: iv, TSLS
+    import CovarianceMatrices as CM
+
+    df = DataFrame(CSV.File(joinpath(dirname(pathof(Regress)), "../dataset/Cigar.csv")))
+    n = nrow(df)
+    X = [ones(n) df.NDI df.Price]
+    Z = [ones(n) df.NDI df.Pimin]
+    ols_f = Regress.ols(df, @formula(Sales ~ NDI + Price); save_cluster = :State)
+    iv_f = iv(TSLS(), df, @formula(Sales ~ NDI + (Price ~ Pimin)); save_cluster = :State)
+    ols_m = Regress.ols(X, df.Sales)
+    iv_m = iv(TSLS(), Z, X, df.Sales)
+
+    # Clusters by column name or by vector, with or without a keyword at its default
+    # value, through `vcov`, `stderror` and `+`: one result.
+    for m in (ols_f, iv_f), K in (CM.CR0, CM.CR1, CM.CR2, CM.CR3, CM.Cluster)
+
+        V = Matrix(vcov(K(df.State), m))
+        @test Matrix(vcov(K(:State), m)) == V
+        @test Matrix(vcov(K(:State), m; dofadjust = true)) == V
+        @test Matrix(vcov(K(df.State), m; dofadjust = true)) == V
+        @test stderror(K(:State), m; dofadjust = true) == sqrt.(diag(V))
+        @test Matrix(vcov(m + vcov(K(:State)))) == V
+        @test Matrix(aVar(K(:State), m)) == Matrix(aVar(K(df.State), m))
+    end
+    for m in (ols_m, iv_m), K in (CM.CR0, CM.CR1, CM.CR2, CM.CR3, CM.Cluster)
+
+        @test_throws "a model fitted from matrices stores no cluster data" vcov(K(:State), m)
+        @test_throws "a model fitted from matrices stores no cluster data" aVar(K(:State), m)
+    end
+    for m in (ols_m, iv_m), K in (CM.CR0, CM.Cluster)
+
+        @test Matrix(vcov(K(df.State), m; dofadjust = true)) == Matrix(vcov(K(df.State), m))
+    end
+    for m in (ols_f, iv_f, ols_m, iv_m), k in (CM.HC1(), CM.Bartlett(3))
+
+        @test Matrix(vcov(k, m; dofadjust = true)) == Matrix(vcov(k, m))
+    end
+
+    # Keywords outside the documented ones throw.
+    for m in (ols_f, iv_f, ols_m, iv_m), f in (vcov, stderror, aVar)
+
+        @test_throws "does not accept the keyword(s) typo" f(CM.HC1(), m; typo = 1)
+        @test_throws "does not accept the keyword(s) typo" f(CM.CR1(df.State), m; typo = 1)
+    end
+    @test_throws "does not accept the keyword(s) scale" vcov(CM.HC1(), ols_f; scale = false)
+
+    # `dofadjust = false` drops the factor of the long-run estimators and of the iid
+    # variance, and leaves the finite-sample factors that define HC1 and CR1.
+    for m in (ols_f, ols_m)
+        p = dof(m)
+        @test Matrix(vcov(CM.Bartlett(3), m; dofadjust = false)) ≈
+              Matrix(vcov(CM.Bartlett(3), m)) .* (n - p) / n
+    end
+    for m in (iv_f, iv_m)
+        @test Matrix(vcov(CM.Uncorrelated(), m; dofadjust = false)) ≈
+              Matrix(vcov(CM.Uncorrelated(), m)) .* dof_residual(m) / n
+        @test_throws "do not apply to Uncorrelated()" vcov(CM.Uncorrelated(), m; prewhite = true)
+    end
+    for m in (ols_f, iv_f, ols_m, iv_m)
+        @test Matrix(vcov(CM.HC1(), m; dofadjust = false)) == Matrix(vcov(CM.HC1(), m))
+    end
+    @test Matrix(vcov(CM.CR1(:State), ols_f; dofadjust = false)) ==
+          Matrix(vcov(CM.CR1(:State), ols_f))
+
+    # `prewhite` does not apply to cluster estimators, on any code path.
+    for m in (ols_f, iv_f)
+        @test_throws "not supported by CR1" vcov(CM.CR1(:State), m; prewhite = true)
+    end
+end

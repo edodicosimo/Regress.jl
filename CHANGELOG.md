@@ -24,7 +24,34 @@
   `CR1`, `CR2` or `CR3`, and for `aVar` with `CR2` or `CR3`.** These returned
   CR0 results. CR0 is unchanged.
 
+- **`vcov`, `stderror` and `aVar` on Regress models throw an `ArgumentError`
+  for an unknown keyword.** `vcov` and `stderror` take `dofadjust`, `demean`
+  and `prewhite`; `aVar` takes `demean`, `prewhite` and `scale`. `vcov(HC1(),
+  model; typo = 1)` was accepted on OLS models, and `vcov(k, model; scale =
+  false)` returned a variance off by a factor of `n`.
+
+- **`prewhite = true` with a cluster estimator throws an `ArgumentError`** on
+  OLS models. With a single cluster dimension it was ignored.
+
 ### Fixed
+
+- Clusters named by column work with every cluster estimator (`CR0`–`CR3`,
+  `Cluster`), with keywords, and on `vcov`, `stderror`, `aVar` and `+`.
+  `vcov(CR1(:State), model; dofadjust = false)` threw a `MethodError`, and
+  `Cluster(:State)` was never looked up. On a model fitted from matrices, a
+  column name throws an `ArgumentError` saying that the model stores no
+  cluster data.
+
+- On IV models, a keyword passed to `vcov` no longer changes the result. Any
+  keyword sent the call to CovarianceMatrices' generic method, so
+  `vcov(CR1(s), model; dofadjust = true)` gave standard errors 1.1% smaller
+  than `vcov(CR1(s), model)` on the Cigar data.
+
+- `dofadjust = false` on OLS models drops the `n/(n-K)` factor of the HAC,
+  EWC, VARHAC and smoother estimators; it was ignored. On IV models it divides
+  the `Uncorrelated()` variance by `n` instead of `n - K`. As in
+  CovarianceMatrices, it does not change `HC1`–`HC5` or `CR0`–`CR3`, whose
+  finite-sample factors define them.
 
 - `adjr2` on formula-fitted OLS models counts the intercept once. It counted
   it twice, so `Sales ~ NDI + Price` on the Cigar data gave 0.207082 where R

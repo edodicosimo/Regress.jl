@@ -648,19 +648,9 @@ function _iv_cr_adjusted_residuals(k::Union{_CM.CR2, _CM.CR3}, X, B, u)
     return adj
 end
 
-"""
-    CovarianceMatrices.aVar(k, m::IVEstimator)
-
-Compute the asymptotic variance matrix for IV estimation.
-"""
-function _CM.aVar(
-        k::K,
-        m::IVEstimator;
-        demean = false,
-        prewhite = false,
-        scale = true,
-        kwargs...
-) where {K <: _CM.AbstractAsymptoticVarianceEstimator}
+# The moment matrix of an IV model has the second-stage regressors (`Adj` for the
+# K-class estimators, the fitted regressors otherwise) times the residuals.
+function _regress_aVar(k, m::IVEstimator; demean = false, prewhite = false, scale = true)
     isnothing(m.postestimation) && error("Model does not have post-estimation data stored.")
     !has_residuals_data(m) && error("Model does not have residuals stored.")
 
@@ -683,15 +673,8 @@ function _CM.aVar(
     return _moment_aVar(k, M; demean, prewhite, scale, weights = kw)
 end
 
-# Disambiguating method for cluster-robust estimators
-function _CM.aVar(
-        k::K,
-        m::IVEstimator;
-        demean = false,
-        prewhite = false,
-        scale = true,
-        kwargs...
-) where {K <: _CM.CR}
+function _regress_aVar(k::_CM.CR, m::IVEstimator; demean = false, prewhite = false,
+        scale = true)
     isnothing(m.postestimation) && error("Model does not have post-estimation data stored.")
     !has_residuals_data(m) && error("Model does not have residuals stored.")
 
@@ -712,45 +695,13 @@ end
 ##
 ## Post-Estimation vcov Methods
 ##
-## Primary API (CovarianceMatrices.jl standard):
-##   vcov(CR1(cluster_vec), model)
-##   stderror(CR1(cluster_vec), model)
-##
-## Convenience API (for stored cluster variables):
-##   vcov(:ClusterVar, :CR1, model)   # looks up cluster from model
-##   stderror(:ClusterVar, :CR1, model)
+## `vcov`, `stderror` and `aVar` are defined in `utils/covariance.jl`; these are
+## the IV methods they call.
 ##
 ##############################################################################
 
-"""
-    vcov(ve::CovarianceMatrices.AbstractAsymptoticVarianceEstimator, m::IVEstimator)
-
-Compute variance-covariance matrix using a specified estimator from CovarianceMatrices.jl.
-
-# Supported Estimators
-- **Heteroskedasticity-robust**: `HC0`, `HC1`, `HC2`, `HC3`, `HC4`, `HC5`
-- **Cluster-robust**: `CR0`, `CR1`, `CR2`, `CR3`
-- **HAC**: `Bartlett(bw)`, `Parzen(bw)`, `QuadraticSpectral(bw)`, etc.
-
-# Examples
-```julia
-model = iv(TSLS(), df, @formula(y ~ x + (endo ~ instrument)))
-
-# Heteroskedasticity-robust
-vcov(HC3(), model)
-
-# Cluster-robust (standard CovarianceMatrices.jl API)
-vcov(CR1(df.firm_id[model.esample]), model)
-
-# Two-way clustering
-vcov(CR1((df.firm_id[model.esample], df.year[model.esample])), model)
-
-# Convenience API (for stored cluster variables - avoids manual subsetting)
-model = iv(TSLS(), df, @formula(y ~ x + (endo ~ inst)), save_cluster = :firm_id)
-vcov(:firm_id, :CR1, model)
-```
-"""
-function StatsBase.vcov(ve::CovarianceMatrices.AbstractAsymptoticVarianceEstimator, m::IVEstimator{T}) where {T}
+function _regress_vcov(ve, m::IVEstimator{T}; dofadjust = true, demean = false,
+        prewhite = false) where {T}
     isnothing(m.postestimation) &&
         error("Model does not have post-estimation data stored. Post-estimation vcov not available.")
     !has_residuals_data(m) &&
@@ -764,13 +715,14 @@ function StatsBase.vcov(ve::CovarianceMatrices.AbstractAsymptoticVarianceEstimat
     # Check for truly homoskedastic variance estimators (not HC0/HC1)
     # Uncorrelated() assumes i.i.d. errors
     if ve isa CovarianceMatrices.Uncorrelated
-        σ² = sum(abs2, resid) / dof_residual(m)
+        _check_iid_keywords(demean, prewhite)
+        σ² = sum(abs2, resid) / (dofadjust ? dof_residual(m) : n)
         return _wrap_vcov(Symmetric(σ² * B), ve, nothing)
     end
 
     # Sandwich variance: V = scale * B * A * B where A = aVar(k, m)
     # HC0/HR0, HC1/HR1, HC2, HC3, etc. all use sandwich form
-    A = _CM.aVar(ve, m)
+    A = _regress_aVar(ve, m; demean, prewhite)
 
     # Scale factor depends on estimator type
     # Note: HC0 = HR0, HC1 = HR1 in CovarianceMatrices.jl
@@ -800,21 +752,8 @@ function StatsBase.vcov(ve::CovarianceMatrices.AbstractAsymptoticVarianceEstimat
     return _wrap_vcov(Symmetric(Σ), ve, A)
 end
 
-"""
-    vcov(k::DriscollKraay, m::IVEstimator; kwargs...)
-
-Driscoll-Kraay variance for a fitted IV model, delegating to the
-CovarianceMatrices implementation.
-
-The estimator carries its own time and unit indices and its small-sample
-correction (`DriscollKraay(...; correction = :HC1)`), so the model supplies
-nothing beyond the standard interface.
-
-Driscoll-Kraay scales by the number of time periods, not by the number of
-observations, so this must not route through the sandwich above: the two
-divisors differ by a factor of roughly `T / n`.
-"""
-function StatsBase.vcov(k::_CM.DriscollKraay, m::IVEstimator; kwargs...)
+# Driscoll-Kraay: see the `_regress_vcov` methods for OLS models.
+function _regress_vcov(k::_CM.DriscollKraay, m::IVEstimator; kwargs...)
     isnothing(m.postestimation) &&
         error("Model does not have post-estimation data stored. Post-estimation vcov not available.")
     Σ = invoke(
@@ -958,99 +897,12 @@ function _compute_nonnested_fe_dof_by_name_iv(m::IVEstimator, cluster_groups)
     return k_fe_nonnested
 end
 
-##############################################################################
-##
-## Symbol-Based Cluster-Robust Variance API
-##
-## When CR types are constructed with Symbol(s) instead of data vectors,
-## these methods look up the cluster data from the model's stored clusters.
-##
-## Usage:
-##   vcov(CR1(:StateID), model)           # single cluster
-##   vcov(CR1(:StateID, :YearID), model)  # multi-way clustering
-##
-##############################################################################
-
-"""
-    _lookup_cluster_vecs_iv(cluster_syms::Tuple{Vararg{Symbol}}, m::IVEstimator)
-
-Look up cluster vectors from stored cluster data in the IV model.
-Returns a tuple of vectors corresponding to the requested cluster symbols.
-"""
-function _lookup_cluster_vecs_iv(cluster_syms::Tuple{Vararg{Symbol}}, m::IVEstimator)
-    return Tuple(begin
-                     haskey(m.postestimation.cluster_vars, name) ||
-                         _cluster_not_found_error(name, m)
-                     m.postestimation.cluster_vars[name]
-                 end
-    for name in cluster_syms)
-end
-
-"""
-    vcov(v::CovarianceMatrices.CR0{T}, m::IVEstimator) where T<:Tuple{Vararg{Symbol}}
-
-Compute cluster-robust variance with CR0 estimator using stored cluster variable(s).
-
-# Examples
-```julia
-model = iv(TSLS(), df, @formula(y ~ x + (endo ~ inst)), save_cluster = :firm_id)
-vcov(CR0(:firm_id), model)
-vcov(CR0(:firm_id, :year), model)  # multi-way
-```
-"""
-function CovarianceMatrices.vcov(
-        v::CovarianceMatrices.CR0{T}, m::IVEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs_iv(_CM.clusters(v), m)
-    return vcov(CovarianceMatrices.CR0(cluster_vecs), m)
-end
-
-"""
-    vcov(v::CovarianceMatrices.CR1{T}, m::IVEstimator) where T<:Tuple{Vararg{Symbol}}
-
-Compute cluster-robust variance with CR1 estimator using stored cluster variable(s).
-
-# Examples
-```julia
-model = iv(TSLS(), df, @formula(y ~ x + (endo ~ inst)), save_cluster = :firm_id)
-vcov(CR1(:firm_id), model)
-vcov(CR1(:firm_id, :year), model)  # multi-way
-```
-"""
-function CovarianceMatrices.vcov(
-        v::CovarianceMatrices.CR1{T}, m::IVEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs_iv(_CM.clusters(v), m)
-    return vcov(CovarianceMatrices.CR1(cluster_vecs), m)
-end
-
-"""
-    vcov(v::CovarianceMatrices.CR2{T}, m::IVEstimator) where T<:Tuple{Vararg{Symbol}}
-
-Compute cluster-robust variance with CR2 (leverage-adjusted) estimator using stored cluster variable(s).
-"""
-function CovarianceMatrices.vcov(
-        v::CovarianceMatrices.CR2{T}, m::IVEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs_iv(_CM.clusters(v), m)
-    return vcov(CovarianceMatrices.CR2(cluster_vecs), m)
-end
-
-"""
-    vcov(v::CovarianceMatrices.CR3{T}, m::IVEstimator) where T<:Tuple{Vararg{Symbol}}
-
-Compute cluster-robust variance with CR3 (squared leverage) estimator using stored cluster variable(s).
-"""
-function CovarianceMatrices.vcov(
-        v::CovarianceMatrices.CR3{T}, m::IVEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs_iv(_CM.clusters(v), m)
-    return vcov(CovarianceMatrices.CR3(cluster_vecs), m)
-end
-
-"""
-    stderror(ve::CovarianceMatrices.AbstractAsymptoticVarianceEstimator, m::IVEstimator)
-
-Compute standard errors using a specified variance estimator.
-"""
-function StatsBase.stderror(ve::CovarianceMatrices.AbstractAsymptoticVarianceEstimator, m::IVEstimator)
-    return sqrt.(diag(vcov(ve, m)))
+# The stored cluster vectors for the column names of `k`; see `_resolve_clusters`.
+function _cluster_vectors(k, m::IVEstimator)
+    return map(_CM.clusters(k)) do name
+        haskey(m.postestimation.cluster_vars, name) || _cluster_not_found_error(name, m)
+        m.postestimation.cluster_vars[name]
+    end
 end
 
 ##############################################################################
@@ -1079,39 +931,6 @@ end
 ##############################################################################
 
 """
-    _resolve_cr_vcov(vcov_type, m::IVEstimator)
-
-Resolve CR estimator with symbols to CR estimator with actual cluster vectors.
-For non-CR or CR with actual data, returns vcov_type unchanged.
-"""
-function _resolve_cr_vcov(vcov_type::CovarianceMatrices.CR0{T},
-        m::IVEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs_iv(_CM.clusters(vcov_type), m)
-    return CovarianceMatrices.CR0(cluster_vecs)
-end
-
-function _resolve_cr_vcov(vcov_type::CovarianceMatrices.CR1{T},
-        m::IVEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs_iv(_CM.clusters(vcov_type), m)
-    return CovarianceMatrices.CR1(cluster_vecs)
-end
-
-function _resolve_cr_vcov(vcov_type::CovarianceMatrices.CR2{T},
-        m::IVEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs_iv(_CM.clusters(vcov_type), m)
-    return CovarianceMatrices.CR2(cluster_vecs)
-end
-
-function _resolve_cr_vcov(vcov_type::CovarianceMatrices.CR3{T},
-        m::IVEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs_iv(_CM.clusters(vcov_type), m)
-    return CovarianceMatrices.CR3(cluster_vecs)
-end
-
-# Fallback for non-CR or CR with actual data
-_resolve_cr_vcov(vcov_type, m::IVEstimator) = vcov_type
-
-"""
     recompute_first_stage_fstat(m::IVEstimator, vcov_type)
 
 Recompute robust per-endogenous first-stage F-statistics using a different vcov
@@ -1125,8 +944,7 @@ function recompute_first_stage_fstat(m::IVEstimator{T}, vcov_type) where {T}
     fsd = pe.first_stage_data
     dof_fes_val = dof_fes(m)
 
-    # Resolve CR symbols to actual cluster vectors
-    resolved_vcov = _resolve_cr_vcov(vcov_type, m)
+    resolved_vcov = _resolve_clusters(vcov_type, m)
 
     return compute_per_endogenous_fstats(
         fsd.Xendo_res, fsd.Z_res, fsd.Pi,
@@ -1984,15 +1802,8 @@ function _ivmatrix_cr_error(k, f)
         "matrices; use CR0, or fit the model with a formula."))
 end
 
-# aVar for CR (cluster-robust) estimators - disambiguating method
-function _CM.aVar(
-        k::K,
-        m::IVMatrixEstimator{T};
-        demean = false,
-        prewhite = false,
-        scale = true,
-        kwargs...
-) where {K <: _CM.CR, T}
+function _regress_aVar(k::_CM.CR, m::IVMatrixEstimator; demean = false, prewhite = false,
+        scale = true)
     _check_ivmatrix_cr(k, aVar)
     # Compute adjusted moment matrix: X̂ .* e
     X_hat = m.postestimation.X_hat
@@ -2001,15 +1812,8 @@ function _CM.aVar(
     return _moment_aVar(k, M; demean, prewhite, scale)
 end
 
-# aVar for HC-type estimators
-function _CM.aVar(
-        k::K,
-        m::IVMatrixEstimator{T};
-        demean = false,
-        prewhite = false,
-        scale = true,
-        kwargs...
-) where {K <: _CM.AbstractAsymptoticVarianceEstimator, T}
+function _regress_aVar(k, m::IVMatrixEstimator; demean = false, prewhite = false,
+        scale = true)
     # Compute adjusted moment matrix: X̂ .* (u .* e)
     # where u is the residual adjustment factor
     X_hat = m.postestimation.X_hat
@@ -2029,64 +1833,34 @@ function _CM.aVar(
     return _moment_aVar(k, M; demean, prewhite, scale, weights = kw)
 end
 
-"""
-    vcov(ve::AbstractAsymptoticVarianceEstimator, m::IVMatrixEstimator)
-
-Compute robust variance-covariance matrix for IV matrix estimator.
-"""
-function StatsBase.vcov(ve::CovarianceMatrices.AbstractAsymptoticVarianceEstimator,
-        m::IVMatrixEstimator{T}) where {T}
+function _regress_vcov(ve, m::IVMatrixEstimator{T}; dofadjust = true, demean = false,
+        prewhite = false) where {T}
     n = nobs(m)
     B = bread(m)
     resid = m.postestimation.residuals
 
     # Homoskedastic case
     if ve isa CovarianceMatrices.Uncorrelated
-        σ² = sum(abs2, resid) / dof_residual(m)
+        _check_iid_keywords(demean, prewhite)
+        σ² = sum(abs2, resid) / (dofadjust ? dof_residual(m) : n)
         return _wrap_vcov(Symmetric(σ² * B), ve, nothing)
     end
 
     _check_ivmatrix_cr(ve, vcov)
 
     # Sandwich: V = scale * B * A * B
-    A = _CM.aVar(ve, m)
+    A = _regress_aVar(ve, m; demean, prewhite)
     scale = convert(T, n)
 
     Σ = scale .* B * A * B
     return _wrap_vcov(Symmetric(Σ), ve, A)
 end
 
-"""
-    vcov(k::DriscollKraay, m::IVMatrixEstimator; kwargs...)
-
-Driscoll-Kraay variance for a matrix-based IV model, delegating to the
-CovarianceMatrices implementation. See the `IVEstimator` method for why the
-sandwich above is not reused.
-"""
-function StatsBase.vcov(k::_CM.DriscollKraay, m::IVMatrixEstimator{T}; kwargs...) where {T}
+# Driscoll-Kraay: see the `_regress_vcov` methods for OLS models.
+function _regress_vcov(k::_CM.DriscollKraay, m::IVMatrixEstimator; kwargs...)
     Σ = invoke(
         StatsBase.vcov, Tuple{_CM.DriscollKraay, RegressionModel}, k, m; kwargs...)
     return _wrap_vcov(Σ, k, nothing)
-end
-
-# Resolves the ambiguity with `aVar(::DriscollKraay, ::RegressionModel)` in
-# CovarianceMatrices: the meat comes from the second-stage moment matrix, like every
-# other estimator's.
-function _CM.aVar(k::_CM.DriscollKraay, m::IVEstimator; kwargs...)
-    return invoke(
-        _CM.aVar, Tuple{_CM.AbstractAsymptoticVarianceEstimator, IVEstimator}, k, m; kwargs...)
-end
-# `IVMatrixEstimator{T}` matches the signature of the generic method above; the bare
-# `IVMatrixEstimator` carries the bound `T <: AbstractFloat` and leaves the ambiguity.
-function _CM.aVar(k::_CM.DriscollKraay, m::IVMatrixEstimator{T}; kwargs...) where {T}
-    return invoke(
-        _CM.aVar, Tuple{_CM.AbstractAsymptoticVarianceEstimator, typeof(m)}, k, m; kwargs...)
-end
-
-function StatsBase.stderror(ve::CovarianceMatrices.AbstractAsymptoticVarianceEstimator,
-        m::IVMatrixEstimator)
-    V = vcov(ve, m)
-    return sqrt.(diag(V))
 end
 
 ##############################################################################
