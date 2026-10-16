@@ -87,8 +87,8 @@ When scale=true (default), divides by n to match CovarianceMatrices.aVar behavio
 function cluster_aVar_direct(X::Matrix{T}, y::AbstractVector{T}, mu::AbstractVector{T},
         clustering::CM.Clustering; scale::Bool = true) where {T <: AbstractFloat}
     n, k = size(X)
-    ngroups = clustering.ngroups
-    groups = clustering.groups
+    ngroups = CM.nclusters(clustering)
+    groups = CM.groups(clustering)
 
     # Allocate G×k buffer (much smaller than n×k for typical cluster scenarios)
     X2 = Matrix{T}(undef, ngroups, k)
@@ -342,13 +342,15 @@ StatsBase.weights(m::OLSModel) = similar(m.rr.wts, 0)
 # any CR2/CR3 leverage adjustment to the moments before mapping those to CR0.
 _matrix_estimator(k) = k
 _matrix_estimator(::CM.HR) = CM.HR0()
-_matrix_estimator(k::CM.CR) = CM.CR0(k.g)
+_matrix_estimator(k::CM.CR) = CM.CR0(CM.clusters(k))
 # The Driscoll-Kraay small-sample correction is a `vcov` factor; the matrix path
 # accepts only the uncorrected `:HC0`.
-_matrix_estimator(k::CM.DriscollKraay) = CM.DriscollKraay(k.K, k.tis, k.iis)
+function _matrix_estimator(k::CM.DriscollKraay)
+    return CM.DriscollKraay(CM.timekernel(k), CM.timeindex(k), CM.unitindex(k))
+end
 function _matrix_estimator(k::CM.CachedCR)
-    _check_cached_estimator(k.estimator)
-    return CM.CachedCR(_matrix_estimator(k.estimator), k.cache)
+    _check_cached_estimator(CM.estimator(k))
+    return CM.CachedCR(_matrix_estimator(CM.estimator(k)), CM.cache(k))
 end
 
 """
@@ -392,7 +394,7 @@ function CM.aVar(
     # Bandwidth-selection weights come from the model matrix, not the moment
     # matrix: they must give the intercept weight 0, and the intercept column of
     # the moment matrix is not constant. `nothing` for non-HAC estimators.
-    kw = CM._kernelweights(k, X)
+    kw = CM.bandwidthweights(k, X)
     return _moment_aVar(k, mm; demean, prewhite, scale, weights = kw)
 end
 
@@ -418,8 +420,8 @@ function _ols_cr_aVar(k::K, m::OLSModel; demean, prewhite, scale) where {K <: CM
 
     # Optimization: For single-cluster CR0/CR1, use direct aggregation
     # This avoids allocating an n×k moment matrix
-    if length(k.g) == 1 && (K <: Union{CM.CR0, CM.CR1})
-        clustering = k.g[1]
+    if length(CM.clusters(k)) == 1 && (K <: Union{CM.CR0, CM.CR1})
+        clustering = only(CM.clusters(k))
         # Direct aggregation: only allocate G×k instead of n×k
         # Pass scale parameter to match CovarianceMatrices.aVar behavior
         return cluster_aVar_direct(X, y, mu, clustering; scale = scale)
@@ -513,7 +515,7 @@ vcov(CR0(:firm_id, :year), model)  # multi-way
 ```
 """
 function CM.vcov(v::CM.CR0{T}, m::OLSEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs(v.g, m)
+    cluster_vecs = _lookup_cluster_vecs(CM.clusters(v), m)
     return vcov(CM.CR0(cluster_vecs), m)
 end
 
@@ -530,7 +532,7 @@ vcov(CR1(:firm_id, :year), model)  # multi-way
 ```
 """
 function CM.vcov(v::CM.CR1{T}, m::OLSEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs(v.g, m)
+    cluster_vecs = _lookup_cluster_vecs(CM.clusters(v), m)
     return vcov(CM.CR1(cluster_vecs), m)
 end
 
@@ -540,7 +542,7 @@ end
 Compute cluster-robust variance with CR2 (leverage-adjusted) estimator using stored cluster variable(s).
 """
 function CM.vcov(v::CM.CR2{T}, m::OLSEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs(v.g, m)
+    cluster_vecs = _lookup_cluster_vecs(CM.clusters(v), m)
     return vcov(CM.CR2(cluster_vecs), m)
 end
 
@@ -550,7 +552,7 @@ end
 Compute cluster-robust variance with CR3 (squared leverage) estimator using stored cluster variable(s).
 """
 function CM.vcov(v::CM.CR3{T}, m::OLSEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs(v.g, m)
+    cluster_vecs = _lookup_cluster_vecs(CM.clusters(v), m)
     return vcov(CM.CR3(cluster_vecs), m)
 end
 
@@ -599,13 +601,13 @@ end
 See also: [`CachedCR`](@ref CovarianceMatrices.CachedCR)
 """
 function CM.CachedCR(cr::CM.CR0{T}, m::OLSEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs(cr.g, m)
+    cluster_vecs = _lookup_cluster_vecs(CM.clusters(cr), m)
     ncols = sum(m.basis_coef)  # Number of non-collinear coefficients
     return CM.CachedCR(CM.CR0(cluster_vecs), ncols)
 end
 
 function CM.CachedCR(cr::CM.CR1{T}, m::OLSEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs(cr.g, m)
+    cluster_vecs = _lookup_cluster_vecs(CM.clusters(cr), m)
     ncols = sum(m.basis_coef)
     return CM.CachedCR(CM.CR1(cluster_vecs), ncols)
 end
@@ -662,7 +664,7 @@ function CM.vcov(v::CM.CachedCR, m::OLSEstimator)
 
     # Compute scale factor using fixest-style small sample correction
     # This matches the standard vcov(CR, OLSEstimator) method
-    scale = _cluster_robust_scale(v.estimator, m, n)
+    scale = _cluster_robust_scale(CM.estimator(v), m, n)
 
     # Apply sandwich: V = scale * B * Σ * B
     vcov_mat = scale .* B * Σ * B
@@ -814,10 +816,10 @@ This matches R fixest's default behavior for cluster-robust standard errors.
 """
 function _cluster_robust_scale(k::CM.CR, m::OLSEstimator, n::Int)
     # Get cluster groupings from the CR estimator
-    cluster_groups = k.g
+    cluster_groups = CM.clusters(k)
 
     # G = number of clusters (for multi-way, use minimum)
-    G = minimum(g.ngroups for g in cluster_groups)
+    G = minimum(CM.nclusters(k))
 
     # G/(G-1) adjustment (cluster DOF correction) - only for CR1, CR2, CR3
     # CR0 has no small-sample adjustment
@@ -873,7 +875,7 @@ function _compute_nonnested_fe_dof(m::OLSEstimator, cluster_groups)
     end
 
     # Extract cluster refs from the CR estimator's grouping objects
-    cluster_refs_list = [g.groups for g in cluster_groups]
+    cluster_refs_list = [CM.groups(g) for g in cluster_groups]
 
     k_fe_nonnested = 0
     for (i, fe_name) in enumerate(fe_names)
@@ -1117,7 +1119,7 @@ function CM.aVar(
     # Bandwidth-selection weights come from the model matrix, not the moment
     # matrix: they must give the intercept weight 0, and the intercept column of
     # the moment matrix is not constant. `nothing` for non-HAC estimators.
-    kw = CM._kernelweights(k, X)
+    kw = CM.bandwidthweights(k, X)
     return _moment_aVar(k, mm; demean, prewhite, scale, weights = kw)
 end
 
@@ -1173,7 +1175,7 @@ function CM.vcov(k::CM.AbstractAsymptoticVarianceEstimator, m::OLSMatrixEstimato
     elseif k isa Union{CM.CR0, CM.CR1, CM.CR2, CM.CR3}
         # Cluster-robust: simple G/(G-1) * (n-1)/(n-K) adjustment
         # For matrix estimator, no fixed effects so K = k
-        G = minimum(g.ngroups for g in k.g)
+        G = minimum(CM.nclusters(k))
         G_adj = k isa CM.CR0 ? 1.0 : G / (G - 1)
         K = dof(m)
         K_adj = (n - 1) / (n - K)

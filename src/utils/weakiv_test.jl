@@ -415,9 +415,9 @@ No DOF scaling is applied (the caller handles that).
 function _weakiv_compute_meat(M::Matrix{T}, vcov_est, n::Int) where {T}
     if vcov_est isa Union{CovarianceMatrices.CR0, CovarianceMatrices.CR1}
         # Cluster-robust: sum within clusters first
-        clusters = vcov_est.g[1]
-        ngroups = clusters.ngroups
-        groups = clusters.groups
+        clustering = first(CovarianceMatrices.clusters(vcov_est))
+        ngroups = CovarianceMatrices.nclusters(clustering)
+        groups = CovarianceMatrices.groups(clustering)
         k = size(M, 2)
 
         cluster_sums = zeros(T, ngroups, k)
@@ -448,8 +448,7 @@ For non-clustered estimators, returns 1.0.
 """
 function _weakiv_cluster_dof_adj(vcov_est, n::Int)
     if vcov_est isa Union{CovarianceMatrices.CR0, CovarianceMatrices.CR1}
-        clusters = vcov_est.g[1]
-        G = clusters.ngroups
+        G = first(CovarianceMatrices.nclusters(vcov_est))
         return (n / (n - 1)) * (G - 1) / G
     else
         return 1.0

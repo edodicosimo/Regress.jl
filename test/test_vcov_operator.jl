@@ -115,7 +115,7 @@ end
         # Bandwidth selection weights come from the model matrix, giving the
         # intercept column weight 0; an intercept-free model gets all-ones
         # weights and the distinction below disappears.
-        kw = CovarianceMatrices._kernelweights(k, X)
+        kw = CovarianceMatrices.bandwidthweights(k, X)
         @test kw == [0.0, 1.0]
 
         from_model = aVar(k, model)

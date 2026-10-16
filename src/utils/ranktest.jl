@@ -179,10 +179,10 @@ function _compute_meat(
         scale = n / dof_residual
         return scale * (moment_matrix' * moment_matrix)
     elseif vcov_type isa Union{CovarianceMatrices.CR0, CovarianceMatrices.CR1}
-        # Cluster-robust - vcov_type.g[1] is a Clustering struct
-        clustering = vcov_type.g[1]
-        groups = clustering.groups       # Vector{Int}, 1-indexed
-        n_clusters = clustering.ngroups
+        # Cluster-robust, on the first clustering dimension
+        clustering = first(CovarianceMatrices.clusters(vcov_type))
+        groups = CovarianceMatrices.groups(clustering)       # Vector{Int}, 1-indexed
+        n_clusters = CovarianceMatrices.nclusters(clustering)
         p = size(moment_matrix, 2)
 
         # Sum moments within clusters (column-major loop)

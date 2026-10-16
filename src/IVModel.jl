@@ -612,13 +612,13 @@ cannot use the CR2/CR3 computation of CovarianceMatrices.
 function _iv_cr_adjusted_residuals(k::Union{_CM.CR2, _CM.CR3}, X, B, u)
     Base.require_one_based_indexing(X, u)
     name = nameof(typeof(k))
-    length(k.g) == 1 || throw(ArgumentError(
+    length(_CM.clusters(k)) == 1 || throw(ArgumentError(
         "multiway clustering with $name is not supported for IV models"))
-    g = k.g[1]
-    length(g.groups) == length(u) || throw(DimensionMismatch(
-        "the cluster variable has $(length(g.groups)) observations, the model $(length(u))"))
-    rows = [Int[] for _ in 1:g.ngroups]
-    for (i, gi) in pairs(g.groups)
+    g = only(_CM.clusters(k))
+    length(g) == length(u) || throw(DimensionMismatch(
+        "the cluster variable has $(length(g)) observations, the model $(length(u))"))
+    rows = [Int[] for _ in 1:_CM.nclusters(g)]
+    for (i, gi) in pairs(_CM.groups(g))
         push!(rows[gi], i)
     end
     p = k isa _CM.CR2 ? -1 / 2 : -1
@@ -668,7 +668,7 @@ function _CM.aVar(
     # Bandwidth-selection weights come from the regressor matrix, not the moment
     # matrix: they must give the intercept weight 0, and the intercept column of
     # the moment matrix is not constant. `nothing` for non-HAC estimators.
-    kw = _CM._kernelweights(k, pe.X_original)
+    kw = _CM.bandwidthweights(k, pe.X_original)
 
     return _moment_aVar(k, M; demean, prewhite, scale, weights = kw)
 end
@@ -830,8 +830,8 @@ With K.fixef = "nonnested" (fixest default):
 This matches R fixest's behavior for IV models with cluster-robust standard errors.
 """
 function _cluster_robust_scale_iv(k::_CM.CR, m::IVEstimator, n::Int)
-    cluster_groups = k.g
-    G = minimum(g.ngroups for g in cluster_groups)
+    cluster_groups = _CM.clusters(k)
+    G = minimum(_CM.nclusters(k))
 
     # G/(G-1) adjustment - only for CR1, CR2, CR3
     G_adj = k isa _CM.CR0 ? 1.0 : G / (G - 1)
@@ -885,7 +885,7 @@ function _compute_nonnested_fe_dof_iv(m::IVEstimator, cluster_groups)
     end
 
     # Extract cluster refs from the CR estimator's grouping objects
-    cluster_refs_list = [g.groups for g in cluster_groups]
+    cluster_refs_list = [_CM.groups(g) for g in cluster_groups]
 
     k_fe_nonnested = 0
     for (i, fe_name) in enumerate(fe_names)
@@ -990,7 +990,7 @@ vcov(CR0(:firm_id, :year), model)  # multi-way
 """
 function CovarianceMatrices.vcov(
         v::CovarianceMatrices.CR0{T}, m::IVEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs_iv(v.g, m)
+    cluster_vecs = _lookup_cluster_vecs_iv(_CM.clusters(v), m)
     return vcov(CovarianceMatrices.CR0(cluster_vecs), m)
 end
 
@@ -1008,7 +1008,7 @@ vcov(CR1(:firm_id, :year), model)  # multi-way
 """
 function CovarianceMatrices.vcov(
         v::CovarianceMatrices.CR1{T}, m::IVEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs_iv(v.g, m)
+    cluster_vecs = _lookup_cluster_vecs_iv(_CM.clusters(v), m)
     return vcov(CovarianceMatrices.CR1(cluster_vecs), m)
 end
 
@@ -1019,7 +1019,7 @@ Compute cluster-robust variance with CR2 (leverage-adjusted) estimator using sto
 """
 function CovarianceMatrices.vcov(
         v::CovarianceMatrices.CR2{T}, m::IVEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs_iv(v.g, m)
+    cluster_vecs = _lookup_cluster_vecs_iv(_CM.clusters(v), m)
     return vcov(CovarianceMatrices.CR2(cluster_vecs), m)
 end
 
@@ -1030,7 +1030,7 @@ Compute cluster-robust variance with CR3 (squared leverage) estimator using stor
 """
 function CovarianceMatrices.vcov(
         v::CovarianceMatrices.CR3{T}, m::IVEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs_iv(v.g, m)
+    cluster_vecs = _lookup_cluster_vecs_iv(_CM.clusters(v), m)
     return vcov(CovarianceMatrices.CR3(cluster_vecs), m)
 end
 
@@ -1076,25 +1076,25 @@ For non-CR or CR with actual data, returns vcov_type unchanged.
 """
 function _resolve_cr_vcov(vcov_type::CovarianceMatrices.CR0{T},
         m::IVEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs_iv(vcov_type.g, m)
+    cluster_vecs = _lookup_cluster_vecs_iv(_CM.clusters(vcov_type), m)
     return CovarianceMatrices.CR0(cluster_vecs)
 end
 
 function _resolve_cr_vcov(vcov_type::CovarianceMatrices.CR1{T},
         m::IVEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs_iv(vcov_type.g, m)
+    cluster_vecs = _lookup_cluster_vecs_iv(_CM.clusters(vcov_type), m)
     return CovarianceMatrices.CR1(cluster_vecs)
 end
 
 function _resolve_cr_vcov(vcov_type::CovarianceMatrices.CR2{T},
         m::IVEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs_iv(vcov_type.g, m)
+    cluster_vecs = _lookup_cluster_vecs_iv(_CM.clusters(vcov_type), m)
     return CovarianceMatrices.CR2(cluster_vecs)
 end
 
 function _resolve_cr_vcov(vcov_type::CovarianceMatrices.CR3{T},
         m::IVEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs_iv(vcov_type.g, m)
+    cluster_vecs = _lookup_cluster_vecs_iv(_CM.clusters(vcov_type), m)
     return CovarianceMatrices.CR3(cluster_vecs)
 end
 
@@ -1962,7 +1962,7 @@ end
 # `aVar(CR1(...), m)`. `vcov` applies no cluster correction here, so CR1 there, and the
 # leverage-adjusted CR2/CR3 anywhere, are rejected rather than reported as CR0.
 _check_ivmatrix_cr(k, f) = nothing
-_check_ivmatrix_cr(k::_CM.CachedCR, f) = _check_ivmatrix_cr(k.estimator, f)
+_check_ivmatrix_cr(k::_CM.CachedCR, f) = _check_ivmatrix_cr(_CM.estimator(k), f)
 _check_ivmatrix_cr(k::Union{_CM.CR2, _CM.CR3}, f) = _ivmatrix_cr_error(k, f)
 _check_ivmatrix_cr(k::_CM.CR1, f) = f === vcov ? _ivmatrix_cr_error(k, f) : nothing
 
@@ -2012,7 +2012,7 @@ function _CM.aVar(
     # Bandwidth-selection weights come from the regressor matrix, not the moment
     # matrix: they must give the intercept weight 0, and the intercept column of
     # the moment matrix is not constant. `nothing` for non-HAC estimators.
-    kw = _CM._kernelweights(k, m.postestimation.X)
+    kw = _CM.bandwidthweights(k, m.postestimation.X)
 
     return _moment_aVar(k, M; demean, prewhite, scale, weights = kw)
 end
