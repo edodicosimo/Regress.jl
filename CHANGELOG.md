@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+### Breaking Changes
+
+- **Requires CovarianceMatrices 0.33.**
+
+- **`vcov(DriscollKraay(...), model)` takes no `type` keyword.** The
+  small-sample correction is set on the estimator:
+  `DriscollKraay(kernel; tis, iis, correction = :HC1)`. Passing `type` throws an
+  `ArgumentError`.
+
+- **`momentmatrix` is no longer available after `using Regress`.**
+  CovarianceMatrices 0.33 no longer exports it, so the re-export does not
+  provide it. Call `CovarianceMatrices.momentmatrix(model)`, or import it with
+  `using CovarianceMatrices: momentmatrix`.
+
+- **`CachedCR` with `CR2` or `CR3` throws an `ArgumentError`** on OLS and IV
+  models. The cache holds no leverage adjustments, so these returned CR1-type
+  results.
+
+- **IV models fitted from matrices throw an `ArgumentError` for `vcov` with
+  `CR1`, `CR2` or `CR3`, and for `aVar` with `CR2` or `CR3`.** These returned
+  CR0 results. CR0 is unchanged.
+
+### Fixed
+
+- `CR2` and `CR3` on OLS models give the leverage-adjusted cluster variance
+  `Σ_g X_g'(I - H_gg)^p u_g u_g'(I - H_gg)^p X_g` for any row order, with
+  weights, and with several cluster dimensions; the computation is that of
+  CovarianceMatrices 0.33. They were wrong when the rows of a cluster were not
+  contiguous (which includes every two-way clustering) and, for weighted
+  models, by a fraction of a percent, because the unweighted residuals were
+  combined with the weighted design. `CovarianceMatrices.momentresiduals` and
+  `CovarianceMatrices.momentmatrix` return the weighted residuals and moments
+  of a weighted OLS model.
+- `CR2` and `CR3` on IV models throw an `ArgumentError` when `I - H_gg` is
+  singular for a cluster, and no longer return `NaN` for an observation with a
+  zero residual.
+- `vcov(DriscollKraay(...), model)` threw a `MethodError` (an ambiguity with
+  CovarianceMatrices) on OLS and IV models.
+
 ### New Features
 
 - **`probit(df, formula)`**: binary-response probit by iteratively reweighted

@@ -598,30 +598,44 @@ end
 # Correlated estimators (HAC, EWC, DriscollKraay, VARHAC, etc.) - no residual adjustment needed
 @noinline residualadjustment(k::_CM.Correlated, m::IVEstimator) = 1.0
 
-# CR2/CR3 for IV - leverage-adjusted cluster-robust.
-#
-# The leverage blocks are built from the second-stage regressor matrix (`Adj` for the
-# K-class estimators, the fitted `X` otherwise), which is the matrix the IV sandwich
-# treats as the design; it is not `modelmatrix(m)`, so this cannot route through
-# `CovarianceMatrices.residual_adjustment` the way the OLS methods do. The root itself
-# is shared with upstream via `_leverage_transform`: CR2 is the symmetric square root,
-# CR3 the plain inverse.
-function residualadjustment(k::Union{_CM.CR2, _CM.CR3}, m::IVEstimator)
+"""
+    _iv_cr_adjusted_residuals(k::Union{CR2, CR3}, X, B, u) -> Vector
+
+Residuals `u` with each cluster's block replaced by `(I - H_gg)^(-1/2) u_g` (CR2, the
+symmetric root) or `(I - H_gg)^(-1) u_g` (CR3), where `H_gg = X_g B X_g'` is the
+cluster's block of the hat matrix of the second-stage regressors `X` with bread `B`.
+
+`X` is the matrix the IV sandwich treats as the design (`Adj` for the K-class
+estimators, the fitted regressors otherwise), not `modelmatrix(m)`, so these models
+cannot use the CR2/CR3 computation of CovarianceMatrices.
+"""
+function _iv_cr_adjusted_residuals(k::Union{_CM.CR2, _CM.CR3}, X, B, u)
+    Base.require_one_based_indexing(X, u)
+    name = nameof(typeof(k))
     length(k.g) == 1 || throw(ArgumentError(
-        "multiway clustering with $(nameof(typeof(k))) is not supported for IV models"))
+        "multiway clustering with $name is not supported for IV models"))
     g = k.g[1]
-    pe = m.postestimation
-    X = has_kclass_adj(pe) ? pe.Adj : pe.X_fitted
-    resid = residuals_for_vcov(m)
-    u = copy(resid)
-    XX = bread(m)
-    for gc in 1:g.ngroups
-        ind = findall(==(gc), g.groups)
-        Xg = view(X, ind, :)
-        Hgg = Xg * XX * Xg'
-        u[ind] = _CM._leverage_transform(k, I - Hgg) * view(u, ind)
+    length(g.groups) == length(u) || throw(DimensionMismatch(
+        "the cluster variable has $(length(g.groups)) observations, the model $(length(u))"))
+    rows = [Int[] for _ in 1:g.ngroups]
+    for (i, gi) in pairs(g.groups)
+        push!(rows[gi], i)
     end
-    return u ./ resid
+    p = k isa _CM.CR2 ? -1 / 2 : -1
+    tol = sqrt(eps(real(float(eltype(X)))))
+    adj = float.(u)
+    for ind in rows
+        isempty(ind) && continue
+        Xg = view(X, ind, :)
+        λ, Q = eigen(Symmetric(I - Xg * B * Xg'))
+        minimum(λ) > tol || throw(ArgumentError(
+            "$name needs I - H_gg to be nonsingular for every cluster, but the cluster " *
+            "containing row $(first(ind)) has a hat-matrix eigenvalue of 1 (to within " *
+            "$tol). This happens when a regressor is nonzero only within one cluster, " *
+            "as with a cluster fixed effect."))
+        adj[ind] = Q * (λ .^ p .* (Q' * view(u, ind)))
+    end
+    return adj
 end
 
 """
@@ -654,12 +668,9 @@ function _CM.aVar(
     # Bandwidth-selection weights come from the regressor matrix, not the moment
     # matrix: they must give the intercept weight 0, and the intercept column of
     # the moment matrix is not constant. `nothing` for non-HAC estimators.
-    kw = _CM.kernelweights(k, pe.X_original)
+    kw = _CM._kernelweights(k, pe.X_original)
 
-    # Compute aVar using CovarianceMatrices
-    Σ = _CM.aVar(
-        k, M; demean = demean, prewhite = prewhite, scale = scale, weights = kw)
-    return Σ
+    return _moment_aVar(k, M; demean, prewhite, scale, weights = kw)
 end
 
 # Disambiguating method for cluster-robust estimators
@@ -679,21 +690,12 @@ function _CM.aVar(
     pe = m.postestimation
     X_for_vcov = has_kclass_adj(pe) ? pe.Adj : pe.X_fitted
 
-    u = residualadjustment(k, m)
-    M = X_for_vcov .* residuals_for_vcov(m)
-    if !(u isa Number && u == 1.0)
-        M = M .* u
+    # CR0/CR1 leave the residuals unadjusted; the CR1 correction is a `vcov` scale factor.
+    u = residuals_for_vcov(m)
+    if k isa Union{_CM.CR2, _CM.CR3}
+        u = _iv_cr_adjusted_residuals(k, X_for_vcov, bread(m), u)
     end
-
-    # Bandwidth-selection weights come from the regressor matrix, not the moment
-    # matrix: they must give the intercept weight 0, and the intercept column of
-    # the moment matrix is not constant. `nothing` for non-HAC estimators.
-    kw = _CM.kernelweights(k, pe.X_original)
-
-    # Compute aVar using CovarianceMatrices
-    Σ = _CM.aVar(
-        k, M; demean = demean, prewhite = prewhite, scale = scale, weights = kw)
-    return Σ
+    return _moment_aVar(k, X_for_vcov .* u; demean, prewhite, scale)
 end
 
 ##############################################################################
@@ -789,24 +791,24 @@ function StatsBase.vcov(ve::CovarianceMatrices.AbstractAsymptoticVarianceEstimat
 end
 
 """
-    vcov(k::DriscollKraay, m::IVEstimator; type::Symbol = :HC0, kwargs...)
+    vcov(k::DriscollKraay, m::IVEstimator; kwargs...)
 
 Driscoll-Kraay variance for a fitted IV model, delegating to the
 CovarianceMatrices implementation.
 
-`type` selects the small-sample correction (`:HC0`, `:HC1`, `:sss`); the
-estimator carries its own time and unit indices, so the model supplies nothing
-beyond the standard interface.
+The estimator carries its own time and unit indices and its small-sample
+correction (`DriscollKraay(...; correction = :HC1)`), so the model supplies
+nothing beyond the standard interface.
 
 Driscoll-Kraay scales by the number of time periods, not by the number of
 observations, so this must not route through the sandwich above: the two
 divisors differ by a factor of roughly `T / n`.
 """
-function StatsBase.vcov(k::_CM.DriscollKraay, m::IVEstimator; type::Symbol = :HC0, kwargs...)
+function StatsBase.vcov(k::_CM.DriscollKraay, m::IVEstimator; kwargs...)
     isnothing(m.postestimation) &&
         error("Model does not have post-estimation data stored. Post-estimation vcov not available.")
     Σ = invoke(
-        StatsBase.vcov, Tuple{_CM.DriscollKraay, RegressionModel}, k, m; type, kwargs...)
+        StatsBase.vcov, Tuple{_CM.DriscollKraay, RegressionModel}, k, m; kwargs...)
     return _wrap_vcov(Σ, k, nothing)
 end
 
@@ -1955,8 +1957,20 @@ end
 # CR (cluster-robust) - no individual residual adjustment needed (handled in aVar)
 @noinline residualadjustment(k::_CM.CR0, m::IVMatrixEstimator) = 1.0
 @noinline residualadjustment(k::_CM.CR1, m::IVMatrixEstimator) = 1.0
-@noinline residualadjustment(k::_CM.CR2, m::IVMatrixEstimator) = 1.0
-@noinline residualadjustment(k::_CM.CR3, m::IVMatrixEstimator) = 1.0
+
+# Cluster-robust estimators on a matrix-based IV model: CR0, and the CR0 meat for
+# `aVar(CR1(...), m)`. `vcov` applies no cluster correction here, so CR1 there, and the
+# leverage-adjusted CR2/CR3 anywhere, are rejected rather than reported as CR0.
+_check_ivmatrix_cr(k, f) = nothing
+_check_ivmatrix_cr(k::_CM.CachedCR, f) = _check_ivmatrix_cr(k.estimator, f)
+_check_ivmatrix_cr(k::Union{_CM.CR2, _CM.CR3}, f) = _ivmatrix_cr_error(k, f)
+_check_ivmatrix_cr(k::_CM.CR1, f) = f === vcov ? _ivmatrix_cr_error(k, f) : nothing
+
+function _ivmatrix_cr_error(k, f)
+    throw(ArgumentError(
+        "$f with $(nameof(typeof(k))) is not implemented for IV models fitted from " *
+        "matrices; use CR0, or fit the model with a formula."))
+end
 
 # aVar for CR (cluster-robust) estimators - disambiguating method
 function _CM.aVar(
@@ -1967,20 +1981,12 @@ function _CM.aVar(
         scale = true,
         kwargs...
 ) where {K <: _CM.CR, T}
+    _check_ivmatrix_cr(k, aVar)
     # Compute adjusted moment matrix: X̂ .* e
     X_hat = m.postestimation.X_hat
     resid = m.postestimation.residuals
     M = X_hat .* resid
-
-    # Bandwidth-selection weights come from the regressor matrix, not the moment
-    # matrix: they must give the intercept weight 0, and the intercept column of
-    # the moment matrix is not constant. `nothing` for non-HAC estimators.
-    kw = _CM.kernelweights(k, m.postestimation.X)
-
-    # Compute aVar using CovarianceMatrices
-    Σ = _CM.aVar(
-        k, M; demean = demean, prewhite = prewhite, scale = scale, weights = kw)
-    return Σ
+    return _moment_aVar(k, M; demean, prewhite, scale)
 end
 
 # aVar for HC-type estimators
@@ -2006,12 +2012,9 @@ function _CM.aVar(
     # Bandwidth-selection weights come from the regressor matrix, not the moment
     # matrix: they must give the intercept weight 0, and the intercept column of
     # the moment matrix is not constant. `nothing` for non-HAC estimators.
-    kw = _CM.kernelweights(k, m.postestimation.X)
+    kw = _CM._kernelweights(k, m.postestimation.X)
 
-    # Compute aVar using CovarianceMatrices
-    Σ = _CM.aVar(
-        k, M; demean = demean, prewhite = prewhite, scale = scale, weights = kw)
-    return Σ
+    return _moment_aVar(k, M; demean, prewhite, scale, weights = kw)
 end
 
 """
@@ -2031,6 +2034,8 @@ function StatsBase.vcov(ve::CovarianceMatrices.AbstractAsymptoticVarianceEstimat
         return _wrap_vcov(Symmetric(σ² * B), ve, nothing)
     end
 
+    _check_ivmatrix_cr(ve, vcov)
+
     # Sandwich: V = scale * B * A * B
     A = _CM.aVar(ve, m)
     scale = convert(T, n)
@@ -2040,16 +2045,30 @@ function StatsBase.vcov(ve::CovarianceMatrices.AbstractAsymptoticVarianceEstimat
 end
 
 """
-    vcov(k::DriscollKraay, m::IVMatrixEstimator; type::Symbol = :HC0, kwargs...)
+    vcov(k::DriscollKraay, m::IVMatrixEstimator; kwargs...)
 
 Driscoll-Kraay variance for a matrix-based IV model, delegating to the
-CovarianceMatrices implementation. See the `IVEstimator` method for the `type`
-options and for why the sandwich above is not reused.
+CovarianceMatrices implementation. See the `IVEstimator` method for why the
+sandwich above is not reused.
 """
-function StatsBase.vcov(k::_CM.DriscollKraay, m::IVMatrixEstimator{T}; type::Symbol = :HC0, kwargs...) where {T}
+function StatsBase.vcov(k::_CM.DriscollKraay, m::IVMatrixEstimator{T}; kwargs...) where {T}
     Σ = invoke(
-        StatsBase.vcov, Tuple{_CM.DriscollKraay, RegressionModel}, k, m; type, kwargs...)
+        StatsBase.vcov, Tuple{_CM.DriscollKraay, RegressionModel}, k, m; kwargs...)
     return _wrap_vcov(Σ, k, nothing)
+end
+
+# Resolves the ambiguity with `aVar(::DriscollKraay, ::RegressionModel)` in
+# CovarianceMatrices: the meat comes from the second-stage moment matrix, like every
+# other estimator's.
+function _CM.aVar(k::_CM.DriscollKraay, m::IVEstimator; kwargs...)
+    return invoke(
+        _CM.aVar, Tuple{_CM.AbstractAsymptoticVarianceEstimator, IVEstimator}, k, m; kwargs...)
+end
+# `IVMatrixEstimator{T}` matches the signature of the generic method above; the bare
+# `IVMatrixEstimator` carries the bound `T <: AbstractFloat` and leaves the ambiguity.
+function _CM.aVar(k::_CM.DriscollKraay, m::IVMatrixEstimator{T}; kwargs...) where {T}
+    return invoke(
+        _CM.aVar, Tuple{_CM.AbstractAsymptoticVarianceEstimator, typeof(m)}, k, m; kwargs...)
 end
 
 function StatsBase.stderror(ve::CovarianceMatrices.AbstractAsymptoticVarianceEstimator,

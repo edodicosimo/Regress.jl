@@ -100,7 +100,7 @@ end
 @testitem "OLS + vcov(HAC) with data-driven bandwidth" tags = [:ols, :vcov] begin
     using Regress, CSV, DataFrames, LinearAlgebra, StatsBase
     using Regress: Bartlett, Andrews, NeweyWest, aVar, bandwidth
-    using CovarianceMatrices: kernelweights, momentmatrix
+    using CovarianceMatrices: CovarianceMatrices, momentmatrix
 
     # `y ~ x` on this dataset separates the weighted and unweighted bandwidths by
     # a factor of 2 (Andrews) and 4.5 (NeweyWest). On Cigar they agree to ~1e-6,
@@ -115,7 +115,7 @@ end
         # Bandwidth selection weights come from the model matrix, giving the
         # intercept column weight 0; an intercept-free model gets all-ones
         # weights and the distinction below disappears.
-        kw = kernelweights(k, X)
+        kw = CovarianceMatrices._kernelweights(k, X)
         @test kw == [0.0, 1.0]
 
         from_model = aVar(k, model)
@@ -452,28 +452,35 @@ end
     reference(k, m; kwargs...) = invoke(
         CovarianceMatrices.vcov, Tuple{DriscollKraay, RegressionModel}, k, m; kwargs...)
 
+    dk(rows; correction = :HC0) = DriscollKraay(
+        Bartlett(4); tis = df.Year[rows], iis = df.State[rows], correction)
+
     model = Regress.ols(df, @formula(Sales ~ Price + NDI))
-    k = DriscollKraay(Bartlett(4), tis = df.Year[model.esample], iis = df.State[model.esample])
+    k = dk(model.esample)
 
     model_iv = Regress.iv(TSLS(), df, @formula(Sales ~ NDI + (Price ~ Pimin)))
-    k_iv = DriscollKraay(Bartlett(4), tis = df.Year[model_iv.esample], iis = df.State[model_iv.esample])
 
-    k_mat = DriscollKraay(Bartlett(4), tis = df.Year, iis = df.State)
     model_mat = Regress.ols([ones(n) df.Price df.NDI], y)
     model_iv_mat = Regress.iv(
         TSLS(), [ones(n) df.Price df.NDI], [ones(n) df.Pimin df.NDI], y;
         n_endogenous = 1)
 
-    for (kk, m) in ((k, model), (k_iv, model_iv), (k_mat, model_mat), (k_mat, model_iv_mat))
+    for (rows, m) in ((model.esample, model), (model_iv.esample, model_iv),
+        (1:n, model_mat), (1:n, model_iv_mat))
+        kk = dk(rows)
         V = vcov(kk, m)
         @test V isa CovarianceMatrix
         @test estimator(V) isa DriscollKraay
         @test Matrix(V) ≈ reference(kk, m)
         @test stderror(kk, m) ≈ sqrt.(diag(reference(kk, m)))
 
-        # `type` selects the small-sample correction and must reach upstream.
-        @test Matrix(vcov(kk, m; type = :HC1)) ≈ reference(kk, m; type = :HC1)
-        @test !isapprox(Matrix(vcov(kk, m; type = :HC1)), reference(kk, m))
+        # The estimator's small-sample correction reaches upstream.
+        kk1 = dk(rows; correction = :HC1)
+        @test Matrix(vcov(kk1, m)) ≈ reference(kk1, m)
+        @test !isapprox(Matrix(vcov(kk1, m)), reference(kk, m))
+
+        # The correction is set on the estimator, not passed to `vcov`.
+        @test_throws "takes no `type` keyword" vcov(kk, m; type = :HC1)
     end
 
     # Driscoll-Kraay scales by the number of time periods; Regress's own HAC
@@ -511,35 +518,59 @@ end
           CM.residual_adjustment(CM.HC1(), model_fe)
 end
 
-@testitem "CR2 uses the symmetric square root" tags = [:ols, :vcov, :cluster] begin
+@testitem "CR2/CR3 match the direct formula" tags = [:ols, :iv, :vcov, :cluster] begin
     using Regress, CSV, DataFrames, LinearAlgebra, StatsBase
     import CovarianceMatrices as CM
 
     df = DataFrame(CSV.File(joinpath(dirname(pathof(Regress)), "../dataset/Cigar.csv")))
-    model = Regress.ols(df, @formula(Sales ~ Price + NDI), save_cluster = :State)
-    cl = df.State[model.esample]
-    X = modelmatrix(model)
-    u = residuals(model)
-    XX = CM.bread(model)
-    k = CM.CR2(cl)
-    g = k.g[1]
+    df.w = abs.(sin.(1:nrow(df))) .+ 0.5
 
-    # The Bell-McCaffrey adjustment is the symmetric root of (I - H_gg). A Cholesky
-    # factor of the same matrix leaves u'(I - H_gg)^-1 u unchanged but differs by an
-    # orthogonal rotation, which does not cancel in the outer products the cluster
-    # meat sums -- so the two give different CR2 standard errors.
-    a = Regress.residualadjustment(k, model)
-    ind = findall(==(1), g.groups)
-    Xg = view(X, ind, :)
-    A = Symmetric(I - Xg * XX * Xg')
+    # Cluster meat with the residuals of cluster g replaced by (I - H_gg)^p u_g, using
+    # the symmetric root for CR2 (p = -1/2) and the inverse for CR3 (p = -1), with
+    # H = X (X'X)^-1 X' for the design `X` the sandwich uses.
+    function meat(X, u, groups, p)
+        B = inv(X' * X)
+        S = zeros(size(X, 2), size(X, 2))
+        for g in unique(groups)
+            ind = findall(==(g), groups)
+            Xg = X[ind, :]
+            s = Xg' * (Symmetric(I - Xg * B * Xg')^p * u[ind])
+            S .+= s * s'
+        end
+        return S ./ size(X, 1)
+    end
+    # Two-way clustering: inclusion-exclusion over the dimensions and their
+    # intersection, each term with its own leverage adjustment.
+    meat(X, u, g1, g2, p) = meat(X, u, g1, p) .+ meat(X, u, g2, p) .-
+                            meat(X, u, tuple.(g1, g2), p)
 
-    symmetric_root = A^(-1 / 2) * u[ind]
-    cholesky_root = cholesky(A).L \ u[ind]
+    for (K, p) in ((CM.CR2, -1 / 2), (CM.CR3, -1))
+        # A weighted model's `modelmatrix` is `√w .* X`, matched by `momentresiduals`.
+        # Year clusters are not contiguous in the data; State clusters are.
+        for kw in ((;), (; weights = :w))
+            model = Regress.ols(df, @formula(Sales ~ Price + NDI); kw...)
+            X = modelmatrix(model)
+            u = CM.momentresiduals(model)
+            @test u ≈ model.rr.y .- model.rr.mu
+            for v in (:State, :Year)
+                g = df[model.esample, v]
+                @test Matrix(aVar(K(g), model)) ≈ meat(X, u, g, p)
+            end
+            gs, gy = df.State[model.esample], df.Year[model.esample]
+            @test Matrix(aVar(K(gs, gy), model)) ≈ meat(X, u, gs, gy, p)
+        end
 
-    @test (a[ind] .* u[ind]) ≈ symmetric_root
-    @test !isapprox(symmetric_root, cholesky_root)
-    # Both roots preserve the quadratic form; only the direction differs.
-    @test dot(symmetric_root, symmetric_root) ≈ dot(cholesky_root, cholesky_root)
+        # IV: the leverage blocks come from the second-stage regressors.
+        model_iv = Regress.iv(Regress.TSLS(), df, @formula(Sales ~ NDI + (Price ~ Pimin)))
+        pe = model_iv.postestimation
+        X = pe.X_fitted
+        u = Regress.residuals_for_vcov(model_iv)
+        @test CM.bread(model_iv) ≈ inv(X' * X)
+        for v in (:State, :Year)
+            g = df[model_iv.esample, v]
+            @test Matrix(aVar(K(g), model_iv)) ≈ meat(X, u, g, p)
+        end
+    end
 end
 
 @testitem "CR2/CR3 on weighted and IV models" tags = [:ols, :iv, :vcov, :cluster] begin
@@ -550,8 +581,8 @@ end
 
     # Each successive estimator applies a larger leverage correction, so the standard
     # errors increase monotonically. Weighting must not disturb that: `modelmatrix`
-    # and `residuals` already carry the weights, so the leverage blocks must not be
-    # weighted a second time.
+    # and `momentresiduals` already carry the weights, so the leverage blocks must not
+    # be weighted a second time.
     for model in (Regress.ols(df, @formula(Sales ~ Price + NDI)),
         Regress.ols(df, @formula(Sales ~ Price + NDI); weights = :Pop))
         cl = df.State[model.esample]
@@ -612,13 +643,66 @@ end
         @test all(isfinite, stderror(K(cl_fe...), model_fe))
     end
 
-    # A cluster whose rows span the column space makes `I - H_gg` singular. Inverting
-    # it yields a huge but finite block, so the failure is caught on the blocks rather
-    # than surfacing as `Inf` in the finished variance.
+    # A cluster whose rows span the column space makes `I - H_gg` singular, which
+    # throws rather than surfacing as `Inf` in the finished variance.
     rng = MersenneTwister(11)
     n = 30
-    dsing = DataFrame(y = randn(rng, n), x1 = randn(rng, n), x2 = randn(rng, n))
+    dsing = DataFrame(y = randn(rng, n), x1 = randn(rng, n), x2 = randn(rng, n),
+        z = randn(rng, n))
     model_sing = Regress.ols(dsing, @formula(y ~ x1 + x2))
-    @test_throws "leverage correction is singular" stderror(
-        CM.CR2(repeat(1:10, inner = 3), fill(1, n)), model_sing)
+    singular = "needs I - H_gg to be nonsingular"
+    for K in (CM.CR2, CM.CR3)
+        @test_throws singular stderror(K(repeat(1:10, inner = 3), fill(1, n)), model_sing)
+    end
+    # The IV computation applies the same check. A regressor that is nonzero only
+    # within one cluster gives that cluster a hat-matrix eigenvalue of 1.
+    dsing.d = Float64.(repeat(1:10, inner = 3) .== 1)
+    model_iv_sing = Regress.iv(Regress.TSLS(), dsing, @formula(y ~ x1 + d + (x2 ~ z)))
+    for K in (CM.CR2, CM.CR3)
+        @test_throws singular stderror(K(repeat(1:10, inner = 3)), model_iv_sing)
+    end
+end
+
+@testitem "CachedCR and matrix-fitted IV cluster estimators" tags = [
+    :ols, :iv, :vcov, :cluster] begin
+    using Regress, CSV, DataFrames, LinearAlgebra, StatsBase
+    import CovarianceMatrices as CM
+
+    df = DataFrame(CSV.File(joinpath(dirname(pathof(Regress)), "../dataset/Cigar.csv")))
+    model = Regress.ols(df, @formula(Sales ~ Price + NDI); save_cluster = [:State, :Year])
+    cl = df.State[model.esample]
+
+    # A cached CR0/CR1 reproduces the uncached result, by vector or by name.
+    for K in (CM.CR0, CM.CR1)
+        @test Matrix(vcov(CM.CachedCR(K(cl), model), model)) ≈ Matrix(vcov(K(cl), model))
+        @test Matrix(vcov(CM.CachedCR(K(:State), model), model)) ≈
+              Matrix(vcov(K(cl), model))
+        @test Matrix(vcov(CM.CachedCR(K(:State, :Year), model), model)) ≈
+              Matrix(vcov(K(:State, :Year), model))
+    end
+    # The cache holds no leverage adjustments, so CR2/CR3 are rejected rather than
+    # computed without them.
+    for K in (CM.CR2, CM.CR3)
+        @test_throws "CachedCR on a Regress model supports CR0 and CR1" CM.CachedCR(K(cl), model)
+        @test_throws "CachedCR on a Regress model supports CR0 and CR1" CM.CachedCR(K(:State), model)
+        cached = CM.CachedCR(K(cl), length(coef(model)))
+        @test_throws "CachedCR on a Regress model supports CR0 and CR1" vcov(cached, model)
+    end
+
+    # An IV model fitted from matrices has no cluster correction in `vcov` and no
+    # leverage adjustment, so only CR0 is computed.
+    n = nrow(df)
+    model_iv_mat = Regress.iv(
+        TSLS(), [ones(n) df.Price df.NDI], [ones(n) df.Pimin df.NDI], df.Sales;
+        n_endogenous = 1)
+    @test all(isfinite, stderror(CM.CR0(df.State), model_iv_mat))
+    @test Matrix(aVar(CM.CR1(df.State), model_iv_mat)) ≈
+          Matrix(aVar(CM.CR0(df.State), model_iv_mat))
+    not_implemented = "is not implemented for IV models fitted from matrices"
+    for K in (CM.CR1, CM.CR2, CM.CR3)
+        @test_throws not_implemented vcov(K(df.State), model_iv_mat)
+    end
+    for K in (CM.CR2, CM.CR3)
+        @test_throws not_implemented aVar(K(df.State), model_iv_mat)
+    end
 end

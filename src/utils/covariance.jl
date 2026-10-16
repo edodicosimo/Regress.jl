@@ -314,9 +314,10 @@ end
 CM.numobs(m::OLSEstimator) = nobs(m)
 CM.numobs(m::OLSMatrixEstimator) = nobs(m)
 
-# Protocol method: residuals (CovarianceMatrices uses _residuals internally)
-CM._residuals(m::OLSEstimator) = residuals(m)
-CM._residuals(m::OLSMatrixEstimator) = residuals(m)
+# Protocol method: the residuals that enter the moments. For a weighted model
+# `modelmatrix` returns `√w .* X`, and these are the matching `√w .* (y - Xβ)`;
+# `residuals(m)` returns the unweighted residuals.
+CM.momentresiduals(m::OLSModel) = m.rr.y .- m.rr.mu
 
 # Protocol method: mask for non-collinear coefficients
 CM.mask(m::OLSEstimator) = m.basis_coef
@@ -324,26 +325,52 @@ CM.mask(m::OLSMatrixEstimator) = m.basis_coef
 
 # Protocol method: weights for the CR2/CR3 leverage blocks.
 #
-# Empty for both weighted and unweighted models. `modelmatrix` and `residuals` already
-# carry the weighting, so `X * bread(m) * X'` is the weighted hat matrix; applying
-# `CovarianceMatrices`' additional `.* wts'` on top would square the weights and drive
-# `I - H_gg` indefinite.
+# Empty for both weighted and unweighted models. `modelmatrix` and `momentresiduals`
+# already carry the weighting, so `X * bread(m) * X'` is the weighted hat matrix;
+# applying `CovarianceMatrices`' additional `.* wts'` on top would square the weights
+# and drive `I - H_gg` indefinite.
 StatsBase.weights(m::OLSModel) = similar(m.rr.wts, 0)
 
 # Note: CM.bread(), CM.leverage() and StatsAPI.leverage() are defined below in
 # their respective sections
 
+# `aVar` on a moment matrix accepts only estimators that need no fitted model: HR0
+# and CR0 rather than HR1–HR5 and CR1–CR3. The `aVar` methods for this package's
+# models fold the model-based residual adjustments into the moments and apply the
+# degrees-of-freedom corrections as `vcov` scale factors, so the matrix computation
+# they need is that of HR0, or of CR0 on the same clusters. Callers must have applied
+# any CR2/CR3 leverage adjustment to the moments before mapping those to CR0.
+_matrix_estimator(k) = k
+_matrix_estimator(::CM.HR) = CM.HR0()
+_matrix_estimator(k::CM.CR) = CM.CR0(k.g)
+# The Driscoll-Kraay small-sample correction is a `vcov` factor; the matrix path
+# accepts only the uncorrected `:HC0`.
+_matrix_estimator(k::CM.DriscollKraay) = CM.DriscollKraay(k.K, k.tis, k.iis)
+function _matrix_estimator(k::CM.CachedCR)
+    _check_cached_estimator(k.estimator)
+    return CM.CachedCR(_matrix_estimator(k.estimator), k.cache)
+end
+
+"""
+    _moment_aVar(k, M; kwargs...) -> CovarianceMatrix
+
+`aVar` of the adjusted moment matrix `M`, computed with `_matrix_estimator(k)` and
+recorded as an estimate of `k`.
+"""
+function _moment_aVar(k, M; kwargs...)
+    A = aVar(_matrix_estimator(k), M; kwargs...)
+    return CovarianceMatrix(parent(A), k, CM.information(A))
+end
+
 """
     CovarianceMatrices.momentmatrix(m::OLSEstimator)
 
-Returns the moment matrix for the model (X .* residuals).
+Returns the moment matrix `modelmatrix(m) .* momentresiduals(m)`, weighted for a
+weighted model.
 Required for post-estimation variance-covariance calculations.
 """
 function CovarianceMatrices.momentmatrix(m::OLSEstimator)
-    # Get residuals and model matrix from new structure
-    resid = residuals(m)
-    X = modelmatrix(m)
-    return X .* resid
+    return modelmatrix(m) .* CM.momentresiduals(m)
 end
 
 function CM.aVar(
@@ -365,8 +392,8 @@ function CM.aVar(
     # Bandwidth-selection weights come from the model matrix, not the moment
     # matrix: they must give the intercept weight 0, and the intercept column of
     # the moment matrix is not constant. `nothing` for non-HAC estimators.
-    kw = CM.kernelweights(k, X)
-    return aVar(k, mm; demean = demean, prewhite = prewhite, scale = scale, weights = kw)
+    kw = CM._kernelweights(k, X)
+    return _moment_aVar(k, mm; demean, prewhite, scale, weights = kw)
 end
 
 # Disambiguating method for cluster-robust estimators (CR <: AbstractAsymptoticVarianceEstimator)
@@ -381,6 +408,10 @@ function CM.aVar(
         scale = true,
         kwargs...
 ) where {K <: CM.CR}
+    return _ols_cr_aVar(k, m; demean, prewhite, scale)
+end
+
+function _ols_cr_aVar(k::K, m::OLSModel; demean, prewhite, scale) where {K <: CM.CR}
     X = modelmatrix(m)
     y = m.rr.y
     mu = m.rr.mu
@@ -394,17 +425,17 @@ function CM.aVar(
         return cluster_aVar_direct(X, y, mu, clustering; scale = scale)
     end
 
-    # Multi-way CR2/CR3: the leverage correction differs across the inclusion-exclusion
-    # terms, so it cannot be folded into a single elementwise multiplier.
-    if length(k.g) > 1 && K <: Union{CM.CR2, CM.CR3}
-        Σ = _cr_leverage_avar(k, m; scale = scale)
-        return CovarianceMatrix(Σ, k, NamedTuple())
+    # CR2/CR3 adjust each cluster's residuals by its block of the hat matrix, and with
+    # several cluster dimensions each inclusion-exclusion term carries its own
+    # adjustment. CovarianceMatrices computes this from the regression-model protocol
+    # (`modelmatrix`, `momentresiduals`, `mask` and the empty `weights` above).
+    if K <: Union{CM.CR2, CM.CR3}
+        return invoke(CM.aVar, Tuple{CM.CR, RegressionModel}, k, m; prewhite, scale)
     end
 
-    # Fallback: standard moment matrix computation for multi-way CR0/CR1 or one-way CR2/CR3
-    u = residualadjustment(k, m)
-    mm = @. X * (y - mu) * u
-    return aVar(k, mm; demean = demean, prewhite = prewhite, scale = scale)
+    # Fallback: multi-way CR0/CR1, and `Cluster`
+    mm = @. X * (y - mu)
+    return _moment_aVar(k, mm; demean, prewhite, scale)
 end
 
 ##############################################################################
@@ -579,22 +610,21 @@ function CM.CachedCR(cr::CM.CR1{T}, m::OLSEstimator) where {T <: Tuple{Vararg{Sy
     return CM.CachedCR(CM.CR1(cluster_vecs), ncols)
 end
 
-function CM.CachedCR(cr::CM.CR2{T}, m::OLSEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs(cr.g, m)
-    ncols = sum(m.basis_coef)
-    return CM.CachedCR(CM.CR2(cluster_vecs), ncols)
-end
-
-function CM.CachedCR(cr::CM.CR3{T}, m::OLSEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs(cr.g, m)
-    ncols = sum(m.basis_coef)
-    return CM.CachedCR(CM.CR3(cluster_vecs), ncols)
-end
-
 # For CR with data vectors, just compute ncols from model
 function CM.CachedCR(cr::CM.CR, m::OLSEstimator)
+    _check_cached_estimator(cr)
     ncols = sum(m.basis_coef)
     return CM.CachedCR(cr, ncols)
+end
+
+# The cache holds cluster buffers, not the per-cluster leverage adjustments of CR2
+# and CR3.
+_check_cached_estimator(cr) = nothing
+function _check_cached_estimator(cr::Union{CM.CR2, CM.CR3})
+    name = nameof(typeof(cr))
+    throw(ArgumentError(
+        "CachedCR on a Regress model supports CR0 and CR1; $name needs the leverage " *
+        "of each cluster, which the cache does not hold. Use vcov($name(...), model)."))
 end
 
 """
@@ -628,7 +658,7 @@ function CM.vcov(v::CM.CachedCR, m::OLSEstimator)
     basis_coef = m.basis_coef
 
     # Use cached aVar computation
-    Σ = aVar(v, mm)
+    Σ = _moment_aVar(v, mm)
 
     # Compute scale factor using fixest-style small sample correction
     # This matches the standard vcov(CR, OLSEstimator) method
@@ -659,7 +689,7 @@ function CM.aVar(
     y = m.rr.y
     mu = m.rr.mu
     mm = @. X * (y - mu)
-    return aVar(k, mm; demean = demean, prewhite = prewhite, scale = scale)
+    return _moment_aVar(k, mm; demean, prewhite, scale)
 end
 
 # Residual adjustment for CachedCR (same as CR0/CR1 - no adjustment)
@@ -758,116 +788,6 @@ end
 
 # Correlated estimators (HAC, EWC, DriscollKraay, VARHAC, etc.) - no residual adjustment needed
 @noinline residualadjustment(k::CM.Correlated, r::OLSModel) = 1.0
-
-# CR2/CR3 apply a per-cluster leverage correction, `(I - H_gg)^(-1/2)` for CR2 and
-# `(I - H_gg)^(-1)` for CR3. `CovarianceMatrices.residual_adjustment` returns these as
-# block-diagonal operators, one block per cluster; multiplying the residuals through
-# and dividing by the originals recovers the elementwise multiplier this package's
-# `aVar` methods expect.
-#
-# CR2 uses the *symmetric* square root, which is what makes the Bell-McCaffrey
-# adjustment unique. A Cholesky factor of the same matrix also satisfies
-# `R'R = (I - H_gg)^{-1}` and so leaves `u'(I - H_gg)^{-1}u` unchanged, but it differs
-# from the symmetric root by an orthogonal rotation that does not cancel in the outer
-# products the cluster meat sums.
-#
-# One cluster dimension only: with several, each term of the inclusion-exclusion sum
-# carries its own leverage correction, so there is no single elementwise multiplier.
-# `_cr_leverage_avar` handles that case.
-function residualadjustment(k::Union{CM.CR2, CM.CR3}, r::OLSModel)
-    H = CM.residual_adjustment(k, r)
-    @assert length(H) == 1
-    u_orig = residuals(r)
-    return (H[1] * u_orig) ./ u_orig
-end
-
-"""
-    _cr_leverage_avar(k::Union{CM.CR2, CM.CR3}, m; scale = true)
-
-Cluster meat for a CR2/CR3 estimator with more than one cluster dimension.
-
-Each non-empty subset of the cluster dimensions contributes a term whose residuals
-carry that subset's own leverage correction, combined with the inclusion-exclusion
-signs `(-1)^(|c| - 1)`. `_check_cr_leverage` rejects a subset whose `I - H_gg` is
-numerically singular, which `CovarianceMatrices` would otherwise invert into a huge
-but finite correction.
-
-The result is not guaranteed positive semi-definite: subtracting the intersection
-terms can drive a diagonal entry negative. That is a property of multiway
-inclusion-exclusion shared with CR0 and CR1, not of the leverage correction.
-
-`scale` follows the `aVar` convention: the result is divided by the number of
-observations.
-"""
-function _cr_leverage_avar(k::Union{CM.CR2, CM.CR3}, m::OLSModel; scale = true)
-    X = modelmatrix(m)
-    u = residuals(m)
-    _check_cr_leverage(k, m, X)
-    H = CM.residual_adjustment(k, m)
-    Ms = map(h -> X .* (h * u), H)
-    V = CM.avar_tuple(k, Ms)
-    Σ = _cr_inclusion_exclusion(V, length(k.g))
-    return scale ? Σ ./ nobs(m) : Σ
-end
-
-# `CovarianceMatrices.residual_adjustment` and `avar_tuple` enumerate the non-empty
-# subsets of the cluster dimensions in the same order, so the sign of the i-th term
-# is fixed by that subset's size. For `n` dimensions the subsets come in blocks of
-# `binomial(n, s)` for `s = 1:n`, which is what this walks.
-function _cr_inclusion_exclusion(V, n::Int)
-    length(V) == 2^n - 1 || throw(ArgumentError(
-        "expected $(2^n - 1) cluster-subset terms for $n cluster dimensions, got $(length(V))"))
-    Σ = zero(first(V))
-    i = 0
-    for s in 1:n, _ in 1:binomial(n, s)
-
-        i += 1
-        if isodd(s)
-            Σ .+= V[i]
-        else
-            Σ .-= V[i]
-        end
-    end
-    return Σ
-end
-
-# A CR2/CR3 leverage block is `(I - H_gg)^(-1/2)` or `(I - H_gg)^(-1)`, so a cluster
-# whose rows span the model's column space makes `I - H_gg` singular. Inverting it
-# yields a huge but finite block rather than `Inf`, and the `Inf` surfaces only later
-# in the sandwich, so `I - H_gg` is screened here, before inversion, where the cause
-# is still identifiable.
-#
-# The test is on eigenvalues rather than on the inverted block's norm: a singular
-# block's eigenvalues sit at machine zero (and may be slightly negative) while a
-# well-conditioned one's are bounded away from it, whereas the inverted norm varies
-# over more than an order of magnitude between datasets and so cannot be thresholded
-# reliably. A non-positive eigenvalue also means the symmetric square root CR2 needs
-# does not exist.
-#
-# Only the cluster dimensions themselves are screened, not the intersections the
-# inclusion-exclusion sum also forms: an intersection's clusters are subsets of a
-# dimension's, so each of its blocks is a principal submatrix of that dimension's
-# block and its eigenvalues interlace them from below. An intersection block is
-# therefore singular only if some dimension's block already is.
-function _check_cr_leverage(k::Union{CM.CR2, CM.CR3}, m::OLSModel, X)
-    B = CM.bread(m)
-    tol = sqrt(eps(real(eltype(X))))
-    for (i, g) in enumerate(k.g)
-        for gc in 1:g.ngroups
-            ind = findall(==(gc), g.groups)
-            isempty(ind) && continue
-            Xg = view(X, ind, :)
-            λmin = minimum(eigvals(Symmetric(Matrix(I - Xg * B * Xg'))))
-            λmin > tol || throw(ArgumentError(
-                "$(nameof(typeof(k))) leverage correction is singular for cluster " *
-                "dimension $i: cluster $gc has $(length(ind)) observations spanning " *
-                "the model's column space, so `I - H_gg` is not positive definite " *
-                "(smallest eigenvalue $λmin). Use CR0 or CR1, or coarsen the cluster " *
-                "dimensions."))
-        end
-    end
-    return nothing
-end
 
 ##############################################################################
 ##
@@ -1092,22 +1012,32 @@ function CM.vcov(k::CM.AbstractAsymptoticVarianceEstimator, m::OLSEstimator; dof
 end
 
 """
-    vcov(k::DriscollKraay, m::OLSEstimator; type::Symbol = :HC0, kwargs...)
+    vcov(k::DriscollKraay, m::OLSEstimator; kwargs...)
 
 Driscoll-Kraay variance for a fitted OLS model, delegating to the
 CovarianceMatrices implementation.
 
-`type` selects the small-sample correction (`:HC0`, `:HC1`, `:sss`); the
-estimator carries its own time and unit indices, so the model supplies nothing
-beyond the standard interface.
+The estimator carries its own time and unit indices and its small-sample
+correction (`DriscollKraay(...; correction = :HC1)`), so the model supplies
+nothing beyond the standard interface.
 
 Driscoll-Kraay scales by the number of time periods, not by the number of
 observations, so this must not route through the sandwich above: the two
 divisors differ by a factor of roughly `T / n`.
 """
-function CM.vcov(k::CM.DriscollKraay, m::OLSEstimator; type::Symbol = :HC0, kwargs...)
-    Σ = invoke(CM.vcov, Tuple{CM.DriscollKraay, RegressionModel}, k, m; type, kwargs...)
+function CM.vcov(k::CM.DriscollKraay, m::OLSEstimator; kwargs...)
+    Σ = invoke(CM.vcov, Tuple{CM.DriscollKraay, RegressionModel}, k, m; kwargs...)
     return _wrap_vcov(Σ, k, nothing)
+end
+
+# Resolves the ambiguity with `aVar(::DriscollKraay, ::RegressionModel)` in
+# CovarianceMatrices: the meat comes from this package's moment matrix, like every
+# other estimator's.
+for M in (OLSEstimator, OLSMatrixEstimator)
+    @eval function CM.aVar(k::CM.DriscollKraay, m::$M; kwargs...)
+        return invoke(
+            CM.aVar, Tuple{CM.AbstractAsymptoticVarianceEstimator, $M}, k, m; kwargs...)
+    end
 end
 
 ##############################################################################
@@ -1119,13 +1049,12 @@ end
 """
     CovarianceMatrices.momentmatrix(m::OLSMatrixEstimator)
 
-Returns the moment matrix for the model (X .* residuals).
+Returns the moment matrix `modelmatrix(m) .* momentresiduals(m)`, weighted for a
+weighted model.
 Required for post-estimation variance-covariance calculations.
 """
 function CovarianceMatrices.momentmatrix(m::OLSMatrixEstimator)
-    resid = residuals(m)
-    X = modelmatrix(m)
-    return X .* resid
+    return modelmatrix(m) .* CM.momentresiduals(m)
 end
 
 """
@@ -1188,8 +1117,8 @@ function CM.aVar(
     # Bandwidth-selection weights come from the model matrix, not the moment
     # matrix: they must give the intercept weight 0, and the intercept column of
     # the moment matrix is not constant. `nothing` for non-HAC estimators.
-    kw = CM.kernelweights(k, X)
-    return aVar(k, mm; demean = demean, prewhite = prewhite, scale = scale, weights = kw)
+    kw = CM._kernelweights(k, X)
+    return _moment_aVar(k, mm; demean, prewhite, scale, weights = kw)
 end
 
 # Disambiguating method for cluster-robust estimators
@@ -1201,30 +1130,7 @@ function CM.aVar(
         scale = true,
         kwargs...
 ) where {K <: CM.CR}
-    X = modelmatrix(m)
-    y = m.rr.y
-    mu = m.rr.mu
-
-    # Optimization: For single-cluster CR0/CR1, use direct aggregation
-    # This avoids allocating an n×k moment matrix
-    if length(k.g) == 1 && (K <: Union{CM.CR0, CM.CR1})
-        clustering = k.g[1]
-        # Direct aggregation: only allocate G×k instead of n×k
-        # Pass scale parameter to match CovarianceMatrices.aVar behavior
-        return cluster_aVar_direct(X, y, mu, clustering; scale = scale)
-    end
-
-    # Multi-way CR2/CR3: the leverage correction differs across the inclusion-exclusion
-    # terms, so it cannot be folded into a single elementwise multiplier.
-    if length(k.g) > 1 && K <: Union{CM.CR2, CM.CR3}
-        Σ = _cr_leverage_avar(k, m; scale = scale)
-        return CovarianceMatrix(Σ, k, NamedTuple())
-    end
-
-    # Fallback: standard moment matrix computation for multi-way CR0/CR1 or one-way CR2/CR3
-    u = residualadjustment(k, m)
-    mm = @. X * (y - mu) * u
-    return aVar(k, mm; demean = demean, prewhite = prewhite, scale = scale)
+    return _ols_cr_aVar(k, m; demean, prewhite, scale)
 end
 
 """
@@ -1298,14 +1204,14 @@ function CM.vcov(k::CM.AbstractAsymptoticVarianceEstimator, m::OLSMatrixEstimato
 end
 
 """
-    vcov(k::DriscollKraay, m::OLSMatrixEstimator; type::Symbol = :HC0, kwargs...)
+    vcov(k::DriscollKraay, m::OLSMatrixEstimator; kwargs...)
 
 Driscoll-Kraay variance for a matrix-based OLS model, delegating to the
-CovarianceMatrices implementation. See the `OLSEstimator` method for the
-`type` options and for why the sandwich above is not reused.
+CovarianceMatrices implementation. See the `OLSEstimator` method for why the
+sandwich above is not reused.
 """
-function CM.vcov(k::CM.DriscollKraay, m::OLSMatrixEstimator; type::Symbol = :HC0, kwargs...)
-    Σ = invoke(CM.vcov, Tuple{CM.DriscollKraay, RegressionModel}, k, m; type, kwargs...)
+function CM.vcov(k::CM.DriscollKraay, m::OLSMatrixEstimator; kwargs...)
+    Σ = invoke(CM.vcov, Tuple{CM.DriscollKraay, RegressionModel}, k, m; kwargs...)
     return _wrap_vcov(Σ, k, nothing)
 end
 
