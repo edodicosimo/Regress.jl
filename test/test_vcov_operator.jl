@@ -600,6 +600,55 @@ end
     @test issorted(se_iv)
 end
 
+@testitem "IV post-estimation vcov with weights" tags = [:iv, :vcov] begin
+    using Regress, CSV, DataFrames, LinearAlgebra, StatsBase
+    import CovarianceMatrices as CM
+
+    df = DataFrame(CSV.File(joinpath(dirname(pathof(Regress)), "../dataset/Cigar.csv")))
+    f = @formula(Sales ~ NDI + (Price ~ Pimin))
+
+    # Reference: R fixest, `feols(Sales ~ NDI | Price ~ Pimin, df, weights = ~Pop)`,
+    # lower triangles in the order (Intercept), NDI, Price.
+    function sym3(v)
+        V = zeros(3, 3)
+        k = 0
+        for j in 1:3, i in j:3
+
+            k += 1
+            V[i, j] = V[j, i] = v[k]
+        end
+        return V
+    end
+    FX_HETERO = sym3([0.9161968845466576, -6.453024471225661e-05, -0.0043877799998184698,
+        1.2123397812074779e-07, -1.2428407657284584e-05, 0.001457942615388505])
+    FX_IID = sym3([0.86396333477438114, -2.846163873676756e-05, -0.0054876724459037565,
+        1.1355868786062744e-07, -1.2477219187461635e-05, 0.0014881227629465264])
+    FX_CL = sym3([6.8435270511043669, -0.001483835776646838, 0.095510291155292124,
+        8.2045437058479111e-07, -6.8212208155359855e-05, 0.0063607397121952427])
+
+    m = Regress.iv(Regress.TSLS(), df, f; weights = :Pop, save_cluster = :State)
+    @test Matrix(vcov(m)) ≈ FX_HETERO rtol = 1e-8
+    @test Matrix(vcov(CM.HC1(), m)) ≈ FX_HETERO rtol = 1e-8
+    @test Matrix(vcov(m + vcov(CM.HC1()))) ≈ FX_HETERO rtol = 1e-8
+    @test Matrix(vcov(CM.Uncorrelated(), m)) ≈ FX_IID rtol = 1e-8
+    # The formula-IV cluster scale counts K = dof(m) = 2 here, where fixest counts
+    # the 3 coefficients.
+    n = nobs(m)
+    @test Matrix(vcov(CM.CR1(df.State), m)) ≈ FX_CL .* ((n - 3) / (n - 2)) rtol = 1e-8
+    @test Matrix(vcov(m + vcov(CM.CR1(:State)))) ≈ Matrix(vcov(CM.CR1(df.State), m))
+
+    # Constant weights leave every variance unchanged.
+    df.c = fill(2.5, nrow(df))
+    for est in (Regress.TSLS(), Regress.LIML())
+        m0 = Regress.iv(est, df, f)
+        mc = Regress.iv(est, df, f; weights = :c)
+        for k in (CM.HC1(), CM.HC3(), CM.CR1(df.State), CM.CR2(df.State),
+            CM.Bartlett(3), CM.Bartlett{CM.Andrews}(), CM.Uncorrelated())
+            @test Matrix(vcov(k, mc)) ≈ Matrix(vcov(k, m0)) rtol = 1e-10
+        end
+    end
+end
+
 @testitem "multiway CR2/CR3" tags = [:ols, :vcov, :cluster] begin
     using Regress, CSV, DataFrames, LinearAlgebra, StatsBase, Random
     using Regress: fe

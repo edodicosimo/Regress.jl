@@ -348,7 +348,7 @@ struct IVEstimator{
     coef::Vector{T}   # Vector of coefficients
 
     esample::BitVector      # Is the row of the original dataframe part of the estimation sample?
-    residuals_esample::Vector{T}  # Residuals for esample rows only (for vcov computation)
+    residuals_esample::Vector{T}  # Unweighted residuals for esample rows only (see `residuals_for_vcov`)
     has_residuals::Bool           # Whether residuals were saved
     fe::DataFrame
 
@@ -409,9 +409,19 @@ has_residuals_data(m::IVEstimator) = m.has_residuals
     residuals_for_vcov(m::IVEstimator) -> Vector{T}
 
 Get residuals for variance-covariance computation (esample rows only).
-This is the type-stable internal accessor for vcov calculations.
+
+The result is on the same scale as the stored design matrices: for a weighted
+fit, `X_fitted`, `X_original` and `y` are multiplied by `√w`, so the residuals
+are too. `m.residuals_esample` holds the unweighted residuals that
+`residuals(m)` returns.
 """
-residuals_for_vcov(m::IVEstimator) = m.residuals_esample
+function residuals_for_vcov(m::IVEstimator)
+    pe = m.postestimation
+    isnothing(pe) &&
+        throw(ArgumentError("Model does not have post-estimation data stored, so its weights are unknown."))
+    pe.weights isa UnitWeights && return m.residuals_esample
+    return m.residuals_esample .* sqrt.(pe.weights)
+end
 
 ##############################################################################
 ##

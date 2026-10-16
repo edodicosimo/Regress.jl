@@ -40,6 +40,15 @@
   zero residual.
 - `vcov(DriscollKraay(...), model)` threw a `MethodError` (an ambiguity with
   CovarianceMatrices) on OLS and IV models.
+- On weighted IV models, every variance computed after the fit was wrong:
+  `vcov(estimator, model)`, `model + vcov(estimator)`, and `stderror` with an
+  estimator, for all estimators (HC, CR, HAC, `Uncorrelated`, Driscoll-Kraay)
+  and for TSLS, LIML, Fuller and k-class fits. The moments combined the
+  unweighted residuals with the √w-weighted regressors, so they carried √w
+  where they need w. The error was not a scalar factor; on `Cigar.csv` weighted
+  by `Pop`, HC1 came out about 1/4900 of the correct value. The variance
+  computed at fit time was correct. Weighted IV variances now equal fixest's
+  `feols(...; weights)` for HC1 and iid.
 
 ### New Features
 
