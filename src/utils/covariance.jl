@@ -350,6 +350,7 @@ function _matrix_estimator(k::CM.DriscollKraay)
 end
 function _matrix_estimator(k::CM.CachedCR)
     _check_cached_estimator(CM.estimator(k))
+    _check_cache(k)
     return CM.CachedCR(_matrix_estimator(CM.estimator(k)), CM.cache(k))
 end
 
@@ -575,13 +576,17 @@ end
 ##############################################################################
 
 """
-    CachedCR(cr::CR, m::OLSEstimator)
+    CachedCR(cr::CR, m)
 
-Create a CachedCR estimator by resolving symbol-based cluster specification
-from the model's stored cluster data.
+Create a `CachedCR` estimator for the Regress model `m` (`OLSEstimator`,
+`OLSMatrixEstimator`, `IVEstimator` or `IVMatrixEstimator`), with buffers sized for the
+model's moment matrix. For a model fitted from a formula, clusters named by column
+(`CR1(:firm_id)`) are looked up in the cluster data saved with the model.
 
-This is the recommended way to create a CachedCR for use with Regress.jl models,
-as it handles symbol-to-vector resolution and determines the correct ncols.
+`cr` must be `CR0` or `CR1`; `CR2` and `CR3` throw an `ArgumentError`. `vcov(cached, m)`
+equals `vcov(cr, m)`. A `CachedCR` that CovarianceMatrices built from a model of another
+type holds that model's adjustments, and `vcov` with it on a Regress model throws an
+`ArgumentError`.
 
 # Examples
 ```julia
@@ -600,24 +605,34 @@ end
 
 See also: [`CachedCR`](@ref CovarianceMatrices.CachedCR)
 """
-function CM.CachedCR(cr::CM.CR0{T}, m::OLSEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs(CM.clusters(cr), m)
-    ncols = sum(m.basis_coef)  # Number of non-collinear coefficients
-    return CM.CachedCR(CM.CR0(cluster_vecs), ncols)
-end
-
-function CM.CachedCR(cr::CM.CR1{T}, m::OLSEstimator) where {T <: Tuple{Vararg{Symbol}}}
-    cluster_vecs = _lookup_cluster_vecs(CM.clusters(cr), m)
-    ncols = sum(m.basis_coef)
-    return CM.CachedCR(CM.CR1(cluster_vecs), ncols)
-end
-
-# For CR with data vectors, just compute ncols from model
-function CM.CachedCR(cr::CM.CR, m::OLSEstimator)
+function CM.CachedCR(cr::CM.CR, m::Union{OLSModel, IVEstimator, IVMatrixEstimator})
     _check_cached_estimator(cr)
-    ncols = sum(m.basis_coef)
-    return CM.CachedCR(cr, ncols)
+    return CM.CachedCR(_resolve_cached_clusters(cr, m), _cr_moment_ncols(m))
 end
+
+_resolve_cached_clusters(k, m) = k
+function _resolve_cached_clusters(k::CM.CR0{<:Tuple{Vararg{Symbol}}}, m::OLSEstimator)
+    return CM.CR0(_lookup_cluster_vecs(CM.clusters(k), m))
+end
+function _resolve_cached_clusters(k::CM.CR1{<:Tuple{Vararg{Symbol}}}, m::OLSEstimator)
+    return CM.CR1(_lookup_cluster_vecs(CM.clusters(k), m))
+end
+_resolve_cached_clusters(k, m::IVEstimator) = _resolve_cr_vcov(k, m)
+
+# Columns of the moment matrix that the model's cluster-robust `aVar` forms. For OLS it
+# keeps the collinear columns; for IV it holds only the estimable ones.
+_cr_moment_ncols(m::OLSModel) = size(modelmatrix(m), 2)
+function _cr_moment_ncols(m::IVEstimator)
+    pe = m.postestimation
+    isnothing(pe) && error("Model does not have post-estimation data stored.")
+    return size(has_kclass_adj(pe) ? pe.Adj : pe.X_fitted, 2)
+end
+_cr_moment_ncols(m::IVMatrixEstimator) = size(m.postestimation.X_hat, 2)
+
+# The estimator whose finite-sample factor `vcov` applies: a `CachedCR` computes the
+# estimator it wraps.
+_uncached(k) = k
+_uncached(k::CM.CachedCR) = CM.estimator(k)
 
 # The cache holds cluster buffers, not the per-cluster leverage adjustments of CR2
 # and CR3.
@@ -629,69 +644,14 @@ function _check_cached_estimator(cr::Union{CM.CR2, CM.CR3})
         "of each cluster, which the cache does not hold. Use vcov($name(...), model)."))
 end
 
-"""
-    vcov(v::CM.CachedCR, m::OLSEstimator)
-
-Compute cluster-robust variance using CachedCR estimator.
-
-# Examples
-```julia
-# Create CachedCR from model
-cached = CachedCR(CR1(:firm_id), model)
-
-# Compute vcov
-V = vcov(cached, model)
-
-# Or use with + operator
-model_robust = model + vcov(cached)
-```
-"""
-function CM.vcov(v::CM.CachedCR, m::OLSEstimator)
-    # Compute moment matrix: X .* (y - mu)
-    # Note: For CachedCR, we use uniform residual adjustment (same as CR0/CR1)
-    X = modelmatrix(m)
-    y = m.rr.y
-    mu = m.rr.mu
-    mm = @. X * (y - mu)
-
-    # Get bread matrix and number of observations
-    B = bread(m)
-    n = nobs(m)
-    basis_coef = m.basis_coef
-
-    # Use cached aVar computation
-    Σ = _moment_aVar(v, mm)
-
-    # Compute scale factor using fixest-style small sample correction
-    # This matches the standard vcov(CR, OLSEstimator) method
-    scale = _cluster_robust_scale(CM.estimator(v), m, n)
-
-    # Apply sandwich: V = scale * B * Σ * B
-    vcov_mat = scale .* B * Σ * B
-
-    all(basis_coef) && return Symmetric(vcov_mat)
-    return mask_vcov_collinear(Symmetric(vcov_mat), basis_coef)
-end
-
-"""
-    aVar(k::CM.CachedCR, m::OLSEstimator; kwargs...)
-
-Compute asymptotic variance using CachedCR estimator.
-"""
-function CM.aVar(
-        k::CM.CachedCR,
-        m::OLSEstimator;
-        demean = false,
-        prewhite = false,
-        scale = true,
-        kwargs...
-)
-    # Compute moment matrix directly
-    X = modelmatrix(m)
-    y = m.rr.y
-    mu = m.rr.mu
-    mm = @. X * (y - mu)
-    return _moment_aVar(k, mm; demean, prewhite, scale)
+# `CachedCR` on a Regress model builds a cache of buffers only. A model cache comes from
+# `CachedCR(k, model)` on a model of another type, and holds that model's adjustments.
+_check_cache(k::CM.CachedCR) = nothing
+function _check_cache(k::CM.CachedCR{<:CM.CR, <:CM.CRModelCache})
+    throw(ArgumentError(
+        "this CachedCR was built by CovarianceMatrices from a model of another type, " *
+        "and its cache holds that model's adjustments. Build it from the Regress model " *
+        "with CachedCR(estimator, model)."))
 end
 
 # Residual adjustment for CachedCR (same as CR0/CR1 - no adjustment)
@@ -957,7 +917,8 @@ function CM.vcov(k::CM.AbstractAsymptoticVarianceEstimator, m::OLSEstimator; dof
     # For HC1/HR1: V = n/(n-k-k_fe) * B * M'M * B  (with proper DOF)
     # For cluster-robust: Use fixest-style small sample correction
 
-    scale = if k isa Union{CM.HC1, CM.HR1}
+    ku = _uncached(k)
+    scale = if ku isa Union{CM.HC1, CM.HR1}
         # HC1: DOF adjustment should account for both k and k_fe
         # residualadjustment for HR1 already applied √(n/dof_residual)
         # So aVar returns M'M * (n/dof_residual) / n = M'M / dof_residual
@@ -967,7 +928,7 @@ function CM.vcov(k::CM.AbstractAsymptoticVarianceEstimator, m::OLSEstimator; dof
         # => scale = n * dof_residual / (n - k - k_fe)
         p_total = dof(m) + dof_fes(m)
         n * dof_residual(m) / (n - p_total)
-    elseif k isa Union{CM.CR0, CM.CR1, CM.CR2, CM.CR3}
+    elseif ku isa Union{CM.CR0, CM.CR1, CM.CR2, CM.CR3}
         # Cluster-robust: Use fixest-style small sample correction
         # Formula: G/(G-1) * (n-1)/(n-K) where:
         #   - G = number of clusters (for multi-way: minimum cluster count)
@@ -975,8 +936,8 @@ function CM.vcov(k::CM.AbstractAsymptoticVarianceEstimator, m::OLSEstimator; dof
         # With K.fixef = "nonnested" (fixest default):
         #   - FE nested in cluster variable are NOT counted in K
         #   - FE NOT nested in cluster variable ARE counted in K
-        _cluster_robust_scale(k, m, n)
-    elseif k isa CM.Correlated
+        _cluster_robust_scale(ku, m, n)
+    elseif ku isa CM.Correlated
         # Correlated (HAC, EWC, etc.): Apply DOF correction n/(n-p)
         # p_total includes both model parameters and fixed effects DOF
         p_total = dof(m) + dof_fes(m)
@@ -1167,16 +1128,17 @@ function CM.vcov(k::CM.AbstractAsymptoticVarianceEstimator, m::OLSMatrixEstimato
     n = nobs(m)
     B = invchol(m.pp)
     basis_coef = m.basis_coef
+    ku = _uncached(k)
 
-    scale = if k isa Union{CM.HC1, CM.HR1}
+    scale = if ku isa Union{CM.HC1, CM.HR1}
         # HC1: DOF adjustment
         p_total = dof(m)
         n * dof_residual(m) / (n - p_total)
-    elseif k isa Union{CM.CR0, CM.CR1, CM.CR2, CM.CR3}
+    elseif ku isa Union{CM.CR0, CM.CR1, CM.CR2, CM.CR3}
         # Cluster-robust: simple G/(G-1) * (n-1)/(n-K) adjustment
         # For matrix estimator, no fixed effects so K = k
-        G = minimum(CM.nclusters(k))
-        G_adj = k isa CM.CR0 ? 1.0 : G / (G - 1)
+        G = minimum(CM.nclusters(ku))
+        G_adj = ku isa CM.CR0 ? 1.0 : G / (G - 1)
         K = dof(m)
         K_adj = (n - 1) / (n - K)
         convert(Float64, n * G_adj * K_adj)

@@ -712,6 +712,69 @@ end
     end
 end
 
+@testitem "CachedCR on every model type" tags = [:ols, :iv, :vcov, :cluster] begin
+    using Regress, CSV, DataFrames, LinearAlgebra, StatsBase
+    using Regress: iv, TSLS
+    import CovarianceMatrices as CM
+    import GLM
+
+    df = DataFrame(CSV.File(joinpath(dirname(pathof(Regress)), "../dataset/Cigar.csv")))
+    df.NDI2 = 2 .* df.NDI
+    n = nrow(df)
+    X = [ones(n) df.NDI df.Price]
+    Z = [ones(n) df.NDI df.Pimin]
+    saved = [:State, :Year]
+    ols_f = Regress.ols(df, @formula(Sales ~ NDI + Price); save_cluster = saved)
+    iv_f = iv(TSLS(), df, @formula(Sales ~ NDI + (Price ~ Pimin)); save_cluster = saved)
+    ols_m = Regress.ols(X, df.Sales)
+    iv_m = iv(TSLS(), Z, X, df.Sales)
+    # With a collinear regressor the OLS moment matrix keeps its column and the IV
+    # moment matrix drops it; the cache must match either.
+    collinear = (
+        Regress.ols(df, @formula(Sales ~ NDI + NDI2 + Price); save_cluster = saved),
+        iv(TSLS(), df, @formula(Sales ~ NDI + NDI2 + (Price ~ Pimin)); save_cluster = saved),
+        Regress.ols([X df.NDI2], df.Sales))
+
+    # Collinear coefficients have NaN variances, which `≈` does not equate.
+    same(a, b) = isequal(isnan.(Matrix(a)), isnan.(Matrix(b))) &&
+                 filter(!isnan, Matrix(a)) ≈ filter(!isnan, Matrix(b))
+
+    by_vector = K -> (K(df.State), K((df.State, df.Year)))
+    by_name = K -> (K(:State), K(:State, :Year))
+    for K in (CM.CR0, CM.CR1)
+        for m in (ols_f, iv_f, collinear[1], collinear[2]),
+            k in (by_vector(K)..., by_name(K)...)
+
+            @test same(vcov(CM.CachedCR(k, m), m), vcov(k, m))
+        end
+        for m in (ols_m, collinear[3]), k in by_vector(K)
+
+            @test same(vcov(CM.CachedCR(k, m), m), vcov(k, m))
+        end
+    end
+    @test same(vcov(ols_f + vcov(CM.CachedCR(CM.CR1(:State), ols_f))), vcov(CM.CR1(:State), ols_f))
+    @test same(vcov(iv_f + vcov(CM.CachedCR(CM.CR1(:State), iv_f))), vcov(CM.CR1(:State), iv_f))
+    # A matrix-fitted IV model computes CR0 only, cached or not.
+    for k in by_vector(CM.CR0)
+        @test same(vcov(CM.CachedCR(k, iv_m), iv_m), vcov(k, iv_m))
+    end
+    for k in by_vector(CM.CR1)
+        @test_throws "is not implemented for IV models fitted from matrices" vcov(
+            CM.CachedCR(k, iv_m), iv_m)
+    end
+
+    for m in (ols_f, iv_f, ols_m, iv_m)
+        # A cache that CovarianceMatrices built from a GLM holds the GLM's adjustments.
+        cached_glm = CM.CachedCR(CM.CR0(df.State), GLM.lm(@formula(Sales ~ NDI + Price), df))
+        @test_throws "was built by CovarianceMatrices from a model of another type" vcov(
+            cached_glm, m)
+        for K in (CM.CR2, CM.CR3)
+            @test_throws "CachedCR on a Regress model supports CR0 and CR1" CM.CachedCR(
+                K(df.State), m)
+        end
+    end
+end
+
 @testitem "CachedCR and matrix-fitted IV cluster estimators" tags = [
     :ols, :iv, :vcov, :cluster] begin
     using Regress, CSV, DataFrames, LinearAlgebra, StatsBase
@@ -721,14 +784,6 @@ end
     model = Regress.ols(df, @formula(Sales ~ Price + NDI); save_cluster = [:State, :Year])
     cl = df.State[model.esample]
 
-    # A cached CR0/CR1 reproduces the uncached result, by vector or by name.
-    for K in (CM.CR0, CM.CR1)
-        @test Matrix(vcov(CM.CachedCR(K(cl), model), model)) ≈ Matrix(vcov(K(cl), model))
-        @test Matrix(vcov(CM.CachedCR(K(:State), model), model)) ≈
-              Matrix(vcov(K(cl), model))
-        @test Matrix(vcov(CM.CachedCR(K(:State, :Year), model), model)) ≈
-              Matrix(vcov(K(:State, :Year), model))
-    end
     # The cache holds no leverage adjustments, so CR2/CR3 are rejected rather than
     # computed without them.
     for K in (CM.CR2, CM.CR3)

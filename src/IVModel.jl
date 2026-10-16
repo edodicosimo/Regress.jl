@@ -787,9 +787,9 @@ function StatsBase.vcov(ve::CovarianceMatrices.AbstractAsymptoticVarianceEstimat
     #   V = (n/(n-k)) * (n-k) * B * aVar * B = n * B * aVar * B
     #
     # So for HC1, scale = n (the DOF adjustment is already in aVar via residualadjustment)
-    scale = if ve isa Union{_CM.CR0, _CM.CR1, _CM.CR2, _CM.CR3}
+    scale = if _uncached(ve) isa Union{_CM.CR0, _CM.CR1, _CM.CR2, _CM.CR3}
         # Cluster-robust: use fixest-style correction
-        _cluster_robust_scale_iv(ve, m, n)
+        _cluster_robust_scale_iv(_uncached(ve), m, n)
     else
         # HC0/HR0, HC1/HR1, HC2/HR2, HC3/HR3, HC4, HC5: scale by n
         # The DOF adjustment (for HC1) is handled via residualadjustment in aVar

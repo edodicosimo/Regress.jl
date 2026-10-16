@@ -45,6 +45,21 @@
   LIML and Fuller threw a `MethodError` because their default variance was
   promoted to `Float64`.
 
+- `CachedCR(k, model)` with `CR0` or `CR1` works on every model type, and
+  `vcov(CachedCR(k, model), model)` equals `vcov(k, model)` for one- and
+  two-way clustering, by vector or, on formula fits, by column name. On
+  matrix-fitted OLS and on formula IV models the cached result lacked the
+  finite-sample factor (CR1 was 2.1% and 2.2% too small on the Cigar data, CR0
+  0.07% too large or small). `CachedCR` on a matrix-fitted OLS model
+  threw a method ambiguity, and on a formula IV model a `MethodError`; on a
+  formula OLS model with a collinear regressor it threw a `DimensionMismatch`.
+  On a formula OLS model the result is a `CovarianceMatrix`, as for `vcov(k,
+  model)`.
+
+- `vcov` with a `CachedCR` that CovarianceMatrices built from a model of
+  another type (such as a GLM) throws an `ArgumentError` on Regress models.
+  It was accepted on formula OLS models.
+
 - `CR2` and `CR3` on OLS models give the leverage-adjusted cluster variance
   `Σ_g X_g'(I - H_gg)^p u_g u_g'(I - H_gg)^p X_g` for any row order, with
   weights, and with several cluster dimensions; the computation is that of
