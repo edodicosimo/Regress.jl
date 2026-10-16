@@ -23,10 +23,10 @@ function _kp_supported(k::CovarianceMatrices.CachedCR)
     _kp_supported(CovarianceMatrices.estimator(k))
 end
 
-function _check_kp_estimator(k)
+function _check_kp_estimator(k, statistic = "The Kleibergen-Paap statistic")
     _kp_supported(k) && return nothing
     throw(ArgumentError(
-        "The Kleibergen-Paap statistic is not defined for $(nameof(typeof(k))). It " *
+        "$statistic is not defined for $(nameof(typeof(k))). It " *
         "supports Uncorrelated, HC0, HC1, CR0, CR1 (any number of cluster dimensions) " *
         "and the HAC kernels (Bartlett, Parzen, QuadraticSpectral, TukeyHanning, " *
         "Truncated). Use, for example, `m + vcov(HC1())`."))

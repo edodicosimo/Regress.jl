@@ -784,8 +784,8 @@ end
 # The factor `c` of `ranktest`: `vcov`'s finite-sample factor, with n / dof_residual for
 # HR1, which `vcov` applies as a residual adjustment, and for Uncorrelated, whose σ² is
 # RSS / dof_residual.
-_kp_factor(k, f::_FirstStage) = _finite_sample_factor(k, f, true)
-_kp_factor(k::Union{_CM.HR1, _CM.Uncorrelated}, f::_FirstStage) = nobs(f) / dof_residual(f)
+_kp_factor(k, f) = _finite_sample_factor(k, f, true)
+_kp_factor(k::Union{_CM.HR1, _CM.Uncorrelated}, f) = nobs(f) / dof_residual(f)
 
 """
     first_stage_df(m::IVEstimator)

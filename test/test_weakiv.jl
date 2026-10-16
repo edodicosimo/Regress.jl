@@ -266,3 +266,60 @@ end
     @test isfinite(r.cv_TSLS[1])
     @test isfinite(r.cv_GMMf[1])
 end
+
+@testitem "weakivtest follows the variance estimator" tags = [:iv, :weakiv, :validation] begin
+    using Regress
+    using DataFrames, CSV
+    using Regress: fe
+
+    df = DataFrame(CSV.File(joinpath(dirname(pathof(Regress)), "../dataset/Cigar.csv")))
+    wt(m, k) = weakivtest(m + vcov(k))
+
+    # With one endogenous regressor the robust F is the first-stage Wald F of the excluded
+    # instruments. References: R fixest 0.14.1
+    # `fitstat(feols(Sales ~ NDI | Price ~ Pimin + Pop, df, vcov = v), ~ivwald1)`.
+    m = Regress.iv(Regress.TSLS(), df, @formula(Sales ~ NDI + (Price ~ Pimin + Pop)),
+        save_cluster = [:State, :Year])
+    for (k, ref) in ((Uncorrelated(), 2622.461860257), (HC1(), 1464.27486829565),
+        (CR1(:State), 280.848595798773), (CR1(:State, :Year), 280.440867252914))
+        @test wt(m, k).F_robust ≈ ref rtol = 1e-10
+    end
+    # Absorbed fixed effect: fixest `feols(Sales ~ NDI | State | Price ~ Pimin + Pop, ...)`.
+    mf = Regress.iv(
+        Regress.TSLS(), df, @formula(Sales ~ NDI + (Price ~ Pimin + Pop) + fe(State)),
+        save_cluster = [:State, :Year])
+    for (k, ref) in ((Uncorrelated(), 2776.23219867604), (HC1(), 1435.11064681269),
+        (CR1(:State), 332.781459426826), (CR1(:Year), 1146.43018399374))
+        @test wt(mf, k).F_robust ≈ ref rtol = 1e-10
+    end
+    for k in (HC0(), CR0(:Year), Bartlett(3))
+        @test wt(m, k).F_robust ≈ only(first_stage_F_robust(m + vcov(k)).stat) rtol = 1e-10
+    end
+
+    # Under iid errors W = Ω ⊗ I, so the three F-statistics coincide.
+    r = wt(m, Uncorrelated())
+    @test r.F_eff ≈ r.F_nonrobust rtol = 1e-12
+    @test r.F_robust ≈ r.F_nonrobust rtol = 1e-12
+
+    # Clusters named by column equal the cluster vector, and every dimension is used.
+    r1 = wt(m, CR1(:State))
+    @test r1.F_eff ≈ wt(m, CR1(df.State)).F_eff rtol = 1e-12
+    @test r1.F_eff ≈ wt(m, CachedCR(CR1(:State), m)).F_eff rtol = 1e-12
+    @test !isapprox(wt(m, CR1(:State, :Year)).F_eff, r1.F_eff; rtol = 1e-6)
+    @test wt(m, HC0()).F_eff != wt(m, HC1()).F_eff
+
+    for k in (HC3(), CR2(:State))
+        @test_throws "The weak-instrument test is not defined for" wt(m, k)
+        @test_throws "It supports Uncorrelated, HC0, HC1, CR0, CR1" wt(m, k)
+    end
+
+    # A matrix-fitted model gives the formula fit's statistics under a cluster estimator.
+    n = nrow(df)
+    X = hcat(ones(n), df.NDI, df.Price)
+    Z = hcat(ones(n), df.NDI, df.Pimin, df.Pop)
+    mm = Regress.iv(Regress.TSLS(), Z, X, Float64.(df.Sales); has_intercept = true,
+        n_endogenous = 1)
+    rm = weakivtest(mm + vcov(CR1(df.State)))
+    @test rm.F_eff ≈ r1.F_eff rtol = 1e-10
+    @test rm.F_robust ≈ r1.F_robust rtol = 1e-10
+end

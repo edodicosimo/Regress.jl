@@ -74,6 +74,18 @@
   endogenous regressor the statistic now equals the first-stage Wald F
   (`first_stage_F_robust`, fixest `ivwald1`) under the same estimator.
 
+- **`weakivtest` follows the model's variance estimator.** It supports the
+  estimators of the Kleibergen-Paap statistic and throws an `ArgumentError` for
+  any other; it treated HC2–HC5, CR2/CR3 and the rest as HC0. Its W uses the
+  moment-matrix path and finite-sample factor of `vcov` applied to the
+  first-stage regression, which for HC1 and CR1 is Stata `weakivtest`'s W. It
+  uses every cluster dimension (only the first before) and resolves clusters
+  named by column (`m + vcov(CR1(:State))` threw a `FieldError`). Under
+  `Uncorrelated`, W is the iid Ω ⊗ I, so `F_eff = F_robust = F_nonrobust`. HC0
+  and CR0 no longer use HC1's degrees of freedom. With absorbed fixed effects, Ω
+  and W subtract the fixed-effect levels from the degrees of freedom. `F_robust`
+  equals `first_stage_F_robust` and fixest `ivwald1` under the same estimator.
+
 ### Fixed
 
 - The first-stage statistics no longer turn every exception into `NaN`. Only a
