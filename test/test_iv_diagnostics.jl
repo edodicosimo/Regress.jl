@@ -203,6 +203,11 @@ end
     for (k, ref) in ((Uncorrelated(), 2776.23219867604), (HC1(), 1435.11064681269),
         (CR1(:State), 332.781459426826), (CR1(:Year), 1146.43018399374))
         @test kp(mf, k).stat ≈ ref rtol = 1e-10
+        # The robust first-stage F counts the absorbed fixed effect in its cluster K too.
+        @test only(first_stage_F_robust(mf + vcov(k)).stat) ≈ ref rtol = 1e-10
+    end
+    for k in (CR0(:Year), Bartlett(3))
+        @test only(first_stage_F_robust(mf + vcov(k)).stat) ≈ kp(mf, k).stat rtol = 1e-10
     end
 
     # Two endogenous regressors, by hand: θ = F Π G⁻¹ with F'F = Z̃'Z̃ and G'G = V'V, the

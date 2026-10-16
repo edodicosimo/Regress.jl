@@ -747,7 +747,8 @@ function recompute_first_stage_fstat(m::IVEstimator{T}, vcov_type) where {T}
         fsd.Xendo_res, fsd.Z_res, fsd.Pi,
         resolved_vcov, dof_fes_val;
         Xendo_orig = fsd.Xendo_orig,
-        newZ = fsd.newZ
+        newZ = fsd.newZ,
+        first_stage = _FirstStage(m)
     )
 end
 

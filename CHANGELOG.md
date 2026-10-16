@@ -82,6 +82,11 @@
   on an over-identified IV model set the robust first-stage F to `NaN` this way;
   it is now computed.
 
+- `first_stage_F_robust` under `CR0` and `CR1` counts the absorbed fixed effects
+  in the cluster K, as `vcov` and the Kleibergen-Paap statistic do, and equals
+  fixest `ivwald1`. On `Sales ~ NDI + (Price ~ Pimin + Pop) + fe(State)` (Cigar) it
+  was 3.5% off under `CR1(:Year)`.
+
 - `UniformSmoother` and `TriangularSmoother` work on every model type, with the
   `n/(n-K)` factor of the other long-run estimators. They threw a `MethodError`.
 

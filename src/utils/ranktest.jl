@@ -168,7 +168,7 @@ _isnumericalfailure(e) = e isa Union{PosDefException, SingularException, LAPACKE
 
 """
     compute_per_endogenous_fstats(Xendo_res, Z_res, Pi, vcov_type, dof_fes;
-                                   Xendo_orig=nothing, newZ=nothing)
+                                   Xendo_orig=nothing, newZ=nothing, first_stage=nothing)
 
 Compute F-statistics for each endogenous variable's first-stage regression.
 
@@ -184,6 +184,8 @@ For each endogenous variable j:
 - `dof_fes::Int`: Degrees of freedom absorbed by fixed effects
 - `Xendo_orig::Union{Matrix{T}, Nothing}`: Original endogenous (for robust F)
 - `newZ::Union{Matrix{T}, Nothing}`: Full first-stage design [Xexo, Z] (for robust F)
+- `first_stage`: The first-stage regression whose finite-sample factor the variance uses
+  (a `_FirstStage`), or `nothing` for that of the regression on `newZ` alone
 
 # Returns
 - `(F_stats, p_values)`: Vectors of F-statistics and p-values, one per endogenous variable
@@ -195,13 +197,14 @@ function compute_per_endogenous_fstats(
         vcov_type,
         dof_fes::Int;
         Xendo_orig::Union{Matrix{T}, Nothing} = nothing,
-        newZ::Union{Matrix{T}, Nothing} = nothing
+        newZ::Union{Matrix{T}, Nothing} = nothing,
+        first_stage = nothing
 ) where {T <: AbstractFloat}
     l = size(Z_res, 2)      # Number of excluded instruments
 
     if !isnothing(Xendo_orig) && !isnothing(newZ)
         return _compute_first_stage_fstats_via_ols(
-            newZ, Xendo_orig, l, vcov_type, dof_fes
+            newZ, Xendo_orig, l, vcov_type, dof_fes; first_stage
         )
     else
         throw(ArgumentError(
@@ -211,7 +214,8 @@ function compute_per_endogenous_fstats(
 end
 
 """
-    _compute_first_stage_fstats_via_ols(newZ, Xendo, n_instruments, vcov_type, dof_fes)
+    _compute_first_stage_fstats_via_ols(newZ, Xendo, n_instruments, vcov_type, dof_fes;
+                                        first_stage = nothing)
 
 Compute first-stage F-statistics by constructing lightweight OLSMatrixEstimator models
 from pre-computed first-stage data and delegating variance computation to CovarianceMatrices.jl.
@@ -226,6 +230,10 @@ CovarianceMatrices sandwich formula.
 - `n_instruments::Int`: Number of excluded instruments (l)
 - `vcov_type`: Any variance estimator supported by CovarianceMatrices.jl
 - `dof_fes::Int`: Degrees of freedom absorbed by fixed effects
+- `first_stage`: The first-stage regression whose finite-sample factor the variance uses
+  (a `_FirstStage`), or `nothing` for that of the regression on `newZ` alone. The two
+  differ for `CR0` and `CR1` when the model absorbs fixed effects, which enter the
+  cluster K of `_cluster_dof` but are not columns of `newZ`.
 
 # Returns
 - `(F_stats, p_values)`: Vectors of F-statistics and p-values, one per endogenous
@@ -235,7 +243,8 @@ function _compute_first_stage_fstats_via_ols(
         Xendo::Matrix{T},
         n_instruments::Int,
         vcov_type,
-        dof_fes::Int
+        dof_fes::Int;
+        first_stage = nothing
 ) where {T <: AbstractFloat}
     n, k_total = size(newZ)
     k = size(Xendo, 2)
@@ -300,6 +309,11 @@ function _compute_first_stage_fstats_via_ols(
             F_stats[j] = T(NaN)
             p_values[j] = T(NaN)
             continue
+        end
+        if !isnothing(first_stage)
+            vcov_matrix = vcov_matrix .*
+                          T(_finite_sample_factor(vcov_type, first_stage, true) /
+                            _finite_sample_factor(vcov_type, fs_model, true))
         end
 
         # Extract instrument coefficient block (last l × l)
