@@ -525,50 +525,55 @@ end
     df = DataFrame(CSV.File(joinpath(dirname(pathof(Regress)), "../dataset/Cigar.csv")))
     df.w = abs.(sin.(1:nrow(df))) .+ 0.5
 
-    # Cluster meat with the residuals of cluster g replaced by (I - H_gg)^p u_g, using
-    # the symmetric root for CR2 (p = -1/2) and the inverse for CR3 (p = -1), with
-    # H = X (X'X)^-1 X' for the design `X` the sandwich uses.
-    function meat(X, u, groups, p)
-        B = inv(X' * X)
-        S = zeros(size(X, 2), size(X, 2))
+    # Cluster meat in the untransformed design `Z` with residuals `e` and weights `w`:
+    # each cluster contributes `Z_g' (I - H_gg)^p (w_g .* e_g)`, with p = -1/2 (CR2) or
+    # p = -1 (CR3) and H_gg = Z_g inv(Z'WZ) Z_g' W_g, as in R's `sandwich::vcovCL`.
+    function meat(Z, e, w, groups, p)
+        B = inv(Z' * (w .* Z))
+        S = zeros(size(Z, 2), size(Z, 2))
         for g in unique(groups)
             ind = findall(==(g), groups)
-            Xg = X[ind, :]
-            s = Xg' * (Symmetric(I - Xg * B * Xg')^p * u[ind])
+            Zg = Z[ind, :]
+            Hgg = Zg * B * Zg' * Diagonal(w[ind])
+            s = Zg' * real((I - Hgg)^p * (w[ind] .* e[ind]))
             S .+= s * s'
         end
-        return S ./ size(X, 1)
+        return S ./ size(Z, 1)
     end
     # Two-way clustering: inclusion-exclusion over the dimensions and their
     # intersection, each term with its own leverage adjustment.
-    meat(X, u, g1, g2, p) = meat(X, u, g1, p) .+ meat(X, u, g2, p) .-
-                            meat(X, u, tuple.(g1, g2), p)
+    meat(Z, e, w, g1, g2, p) = meat(Z, e, w, g1, p) .+ meat(Z, e, w, g2, p) .-
+                               meat(Z, e, w, tuple.(g1, g2), p)
 
     for (K, p) in ((CM.CR2, -1 / 2), (CM.CR3, -1))
         # A weighted model's `modelmatrix` is `√w .* X`, matched by `momentresiduals`.
         # Year clusters are not contiguous in the data; State clusters are.
-        for kw in ((;), (; weights = :w))
+        for weighted in (false, true)
+            kw = weighted ? (; weights = :w) : (;)
             model = Regress.ols(df, @formula(Sales ~ Price + NDI); kw...)
-            X = modelmatrix(model)
-            u = CM.momentresiduals(model)
-            @test u ≈ model.rr.y .- model.rr.mu
+            w = weighted ? df.w[model.esample] : ones(nobs(model))
+            Z = modelmatrix(model) ./ sqrt.(w)
+            e = CM.momentresiduals(model) ./ sqrt.(w)
+            @test e ≈ residuals(model)
             for v in (:State, :Year)
                 g = df[model.esample, v]
-                @test Matrix(aVar(K(g), model)) ≈ meat(X, u, g, p)
+                @test Matrix(aVar(K(g), model)) ≈ meat(Z, e, w, g, p)
             end
             gs, gy = df.State[model.esample], df.Year[model.esample]
-            @test Matrix(aVar(K(gs, gy), model)) ≈ meat(X, u, gs, gy, p)
-        end
+            @test Matrix(aVar(K(gs, gy), model)) ≈ meat(Z, e, w, gs, gy, p)
 
-        # IV: the leverage blocks come from the second-stage regressors.
-        model_iv = Regress.iv(Regress.TSLS(), df, @formula(Sales ~ NDI + (Price ~ Pimin)))
-        pe = model_iv.postestimation
-        X = pe.X_fitted
-        u = Regress.residuals_for_vcov(model_iv)
-        @test CM.bread(model_iv) ≈ inv(X' * X)
-        for v in (:State, :Year)
-            g = df[model_iv.esample, v]
-            @test Matrix(aVar(K(g), model_iv)) ≈ meat(X, u, g, p)
+            # IV: the leverage blocks come from the second-stage regressors.
+            model_iv = Regress.iv(Regress.TSLS(), df,
+                @formula(Sales ~ NDI + (Price ~ Pimin)); kw...)
+            pe = model_iv.postestimation
+            Z = pe.X_fitted ./ sqrt.(w)
+            e = Regress.residuals_for_vcov(model_iv) ./ sqrt.(w)
+            @test CM.bread(model_iv) ≈ inv(Z' * (w .* Z))
+            for v in (:State, :Year)
+                g = df[model_iv.esample, v]
+                @test Matrix(aVar(K(g), model_iv)) ≈ meat(Z, e, w, g, p)
+            end
+            @test Matrix(aVar(K(gs, gy), model_iv)) ≈ meat(Z, e, w, gs, gy, p)
         end
     end
 end
@@ -580,9 +585,7 @@ end
     df = DataFrame(CSV.File(joinpath(dirname(pathof(Regress)), "../dataset/Cigar.csv")))
 
     # Each successive estimator applies a larger leverage correction, so the standard
-    # errors increase monotonically. Weighting must not disturb that: `modelmatrix`
-    # and `momentresiduals` already carry the weights, so the leverage blocks must not
-    # be weighted a second time.
+    # errors increase monotonically, with and without weights.
     for model in (Regress.ols(df, @formula(Sales ~ Price + NDI)),
         Regress.ols(df, @formula(Sales ~ Price + NDI); weights = :Pop))
         cl = df.State[model.esample]
@@ -646,7 +649,7 @@ end
     end
 end
 
-@testitem "multiway CR2/CR3" tags = [:ols, :vcov, :cluster] begin
+@testitem "multiway CR2/CR3" tags = [:ols, :iv, :vcov, :cluster] begin
     using Regress, CSV, DataFrames, LinearAlgebra, StatsBase, Random
     using Regress: fe
     import CovarianceMatrices as CM
@@ -678,8 +681,10 @@ end
     df3.Region = mod.(df3.State, 5)
     model3 = Regress.ols(df3, @formula(Sales ~ Price + NDI))
     cl3 = (df3.State[model3.esample], df3.Year[model3.esample], df3.Region[model3.esample])
+    model3_iv = Regress.iv(Regress.TSLS(), df3, @formula(Sales ~ NDI + (Price ~ Pimin)))
     for K in (CM.CR2, CM.CR3)
         @test all(isfinite, stderror(K(cl3...), model3))
+        @test all(isfinite, stderror(K(cl3...), model3_iv))
     end
 
     # Fixed effects absorbed out of the design do not disturb the leverage blocks.
@@ -706,6 +711,77 @@ end
     model_iv_sing = Regress.iv(Regress.TSLS(), dsing, @formula(y ~ x1 + d + (x2 ~ z)))
     for K in (CM.CR2, CM.CR3)
         @test_throws singular stderror(K(repeat(1:10, inner = 3)), model_iv_sing)
+    end
+end
+
+@testitem "CR2/CR3 against R sandwich" tags = [:ols, :iv, :vcov, :cluster] begin
+    using Regress, CSV, DataFrames, LinearAlgebra, StatsBase
+    import CovarianceMatrices as CM
+
+    df = DataFrame(CSV.File(joinpath(dirname(pathof(Regress)), "../dataset/Cigar.csv")))
+    n = nrow(df)
+
+    # Diagonals of R `sandwich::vcovCL(fit, cluster = ..., type = "HC2"/"HC3")` (sandwich
+    # 3.1.1), with `fit = lm(Sales ~ NDI + Price, df, weights = ...)` or
+    # `AER::ivreg(Sales ~ NDI + Price | NDI + Pimin, data = df, weights = ...)`.
+    # Order: (Intercept), NDI, Price.
+    R = Dict(
+        (:CR2, :ols, :w, 1) =>
+            [6.9408801430461873, 1.4974013866616922e-6, 1.2051637541315835e-2],
+        (:CR2, :iv, :w, 1) =>
+            [7.0966308211824662, 9.0197608807030392e-7, 6.8065238824069531e-3],
+        (:CR2, :ols, :u, 2) =>
+            [33.515303088084245, 3.3521283872509227e-6, 4.5937081221287576e-2],
+        (:CR2, :ols, :w, 2) =>
+            [8.5977034199088962, 1.7937603879023921e-6, 1.5259222146829400e-2],
+        (:CR3, :ols, :w, 1) =>
+            [7.1571325247465580, 1.8643981443444393e-6, 1.5064837259768149e-2],
+        (:CR3, :iv, :w, 1) =>
+            [7.5614853792483032, 1.0193914989965819e-6, 7.4854994003590294e-3],
+        (:CR3, :ols, :u, 2) =>
+            [35.212602404209903, 3.7180270402146302e-6, 5.2057263959472792e-2],
+        (:CR3, :ols, :w, 2) =>
+            [9.2613636182139665, 2.2587430382498804e-6, 1.9174262861277130e-2],
+        # Two-way IV. `vcovCL` adjusts a term whose clusters are all single rows (here
+        # State × Year) with `hatvalues(ivreg)`, which is not the leverage of the
+        # projected regressors used for every other term. These references are R's
+        # `meatCL` for State and for Year minus the State × Year term computed with the
+        # projected-regressor leverage `h = w x̂'(X̂'WX̂)⁻¹x̂`, so all three terms use the
+        # same hat matrix.
+        (:CR2, :iv, :u, 2) =>
+            [28.288903408468084, 2.0045169821290485e-6, 2.2833984323730811e-2],
+        (:CR2, :iv, :w, 2) =>
+            [8.7765671799573202, 1.1607183953871947e-6, 9.0880651255923935e-3],
+        (:CR3, :iv, :u, 2) =>
+            [29.308190101456553, 2.1995873147067393e-6, 2.5623382915253939e-2],
+        (:CR3, :iv, :w, 2) =>
+            [9.6581933670386722, 1.2800987399195570e-6, 9.4025936062981930e-3])
+
+    fits = Dict()
+    for (wkey, kw) in ((:u, (;)), (:w, (; weights = :Pop)))
+        fits[(:ols, wkey)] = Regress.ols(df, @formula(Sales ~ NDI + Price); kw...)
+        fits[(:iv, wkey)] = Regress.iv(Regress.TSLS(), df,
+            @formula(Sales ~ NDI + (Price ~ Pimin)); kw...)
+    end
+    for ((K, mtype, wkey, d), ref) in R
+        k = getproperty(CM, K)(d == 1 ? (df.State,) : (df.State, df.Year))
+        @test diag(vcov(k, fits[(mtype, wkey)])) ≈ ref rtol = 1e-8
+    end
+
+    # The matrix fit uses the same weighted hat matrix.
+    X = [ones(n) df.NDI df.Price]
+    ols_mw = Regress.ols(X, df.Sales; weights = df.Pop)
+    for K in (CM.CR2, CM.CR3), cl in ((df.State,), (df.State, df.Year))
+
+        @test Matrix(vcov(K(cl), ols_mw)) ≈ Matrix(vcov(K(cl), fits[(:ols, :w)])) rtol = 1e-10
+    end
+
+    # A zero weight has no place in the weighted hat matrix.
+    w0 = copy(Float64.(df.Pop))
+    w0[1] = 0
+    ols_w0 = Regress.ols(X, df.Sales; weights = w0)
+    for K in (CM.CR2, CM.CR3)
+        @test_throws "$(nameof(K)) needs positive weights" vcov(K(df.State), ols_w0)
     end
 end
 
@@ -800,14 +876,9 @@ end
         end
         @test issorted([stderror(K(df.State), iv_m)[3]
                         for K in (CM.CR0, CM.CR1, CM.CR2, CM.CR3)])
-        for K in (CM.CR0, CM.CR1)
+        for K in (CM.CR0, CM.CR1, CM.CR2, CM.CR3)
             k = K((df.State, df.Year))
             @test Matrix(vcov(k, iv_m)) ≈ Matrix(vcov(k, iv_f)) rtol=1e-12
-        end
-        for K in (CM.CR2, CM.CR3), m in (iv_f, iv_m)
-
-            @test_throws "multiway clustering with $(nameof(K)) is not supported for IV models" vcov(
-                K((df.State, df.Year)), m)
         end
     end
 end

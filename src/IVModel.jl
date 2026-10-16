@@ -608,46 +608,6 @@ end
 # Correlated estimators (HAC, EWC, DriscollKraay, VARHAC, etc.) - no residual adjustment needed
 @noinline residualadjustment(k::_CM.Correlated, m::IVEstimator) = 1.0
 
-"""
-    _iv_cr_adjusted_residuals(k::Union{CR2, CR3}, X, B, u) -> Vector
-
-Residuals `u` with each cluster's block replaced by `(I - H_gg)^(-1/2) u_g` (CR2, the
-symmetric root) or `(I - H_gg)^(-1) u_g` (CR3), where `H_gg = X_g B X_g'` is the
-cluster's block of the hat matrix of the second-stage regressors `X` with bread `B`.
-
-`X` is the matrix the IV sandwich treats as the design (`Adj` for the K-class
-estimators, the fitted regressors otherwise), not `modelmatrix(m)`, so these models
-cannot use the CR2/CR3 computation of CovarianceMatrices.
-"""
-function _iv_cr_adjusted_residuals(k::Union{_CM.CR2, _CM.CR3}, X, B, u)
-    Base.require_one_based_indexing(X, u)
-    name = nameof(typeof(k))
-    length(_CM.clusters(k)) == 1 || throw(ArgumentError(
-        "multiway clustering with $name is not supported for IV models"))
-    g = only(_CM.clusters(k))
-    length(g) == length(u) || throw(DimensionMismatch(
-        "the cluster variable has $(length(g)) observations, the model $(length(u))"))
-    rows = [Int[] for _ in 1:_CM.nclusters(g)]
-    for (i, gi) in pairs(_CM.groups(g))
-        push!(rows[gi], i)
-    end
-    p = k isa _CM.CR2 ? -1 / 2 : -1
-    tol = sqrt(eps(real(float(eltype(X)))))
-    adj = float.(u)
-    for ind in rows
-        isempty(ind) && continue
-        Xg = view(X, ind, :)
-        λ, Q = eigen(Symmetric(I - Xg * B * Xg'))
-        minimum(λ) > tol || throw(ArgumentError(
-            "$name needs I - H_gg to be nonsingular for every cluster, but the cluster " *
-            "containing row $(first(ind)) has a hat-matrix eigenvalue of 1 (to within " *
-            "$tol). This happens when a regressor is nonzero only within one cluster, " *
-            "as with a cluster fixed effect."))
-        adj[ind] = Q * (λ .^ p .* (Q' * view(u, ind)))
-    end
-    return adj
-end
-
 # The moment matrix of an IV model has the second-stage regressors (`Adj` for the
 # K-class estimators, the fitted regressors otherwise) times the residuals.
 function _regress_aVar(k, m::IVEstimator; demean = false, prewhite = false, scale = true)
@@ -682,9 +642,13 @@ function _regress_aVar(k::_CM.CR, m::IVEstimator; demean = false, prewhite = fal
     X_for_vcov = has_kclass_adj(pe) ? pe.Adj : pe.X_fitted
 
     # CR0/CR1 leave the residuals unadjusted; the CR1 correction is a `vcov` scale factor.
+    # The CR2/CR3 hat matrix is that of the second-stage regressors, not of
+    # `modelmatrix(m)`.
     u = residuals_for_vcov(m)
     if k isa Union{_CM.CR2, _CM.CR3}
-        u = _iv_cr_adjusted_residuals(k, X_for_vcov, bread(m), u)
+        w = pe.weights isa UnitWeights ? similar(u, 0) : pe.weights
+        return _leverage_aVar(k, X_for_vcov, X_for_vcov, bread(m), u, w;
+            demean, prewhite, scale)
     end
     return _moment_aVar(k, X_for_vcov .* u; demean, prewhite, scale)
 end
@@ -1627,7 +1591,8 @@ function _regress_aVar(k::_CM.CR, m::IVMatrixEstimator; demean = false, prewhite
     X_hat = m.postestimation.X_hat
     u = m.postestimation.residuals
     if k isa Union{_CM.CR2, _CM.CR3}
-        u = _iv_cr_adjusted_residuals(k, X_hat, bread(m), u)
+        return _leverage_aVar(k, X_hat, X_hat, bread(m), u, similar(u, 0);
+            demean, prewhite, scale)
     end
     return _moment_aVar(k, X_hat .* u; demean, prewhite, scale)
 end

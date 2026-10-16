@@ -22,8 +22,18 @@
 
 - **`CR2` and `CR3` on IV models fitted from matrices give the leverage-adjusted
   cluster variance of the formula fit**, for `vcov` and `aVar`. They returned CR0
-  results. Multiway `CR2` and `CR3` throw an `ArgumentError`, as on formula IV
-  models.
+  results.
+
+- **Weighted `CR2` and `CR3` follow R `sandwich::vcovCL`** on OLS and IV
+  models: each cluster's moments are `X_g'(I - H_gg)^p (w_g .* e_g)` with the
+  weighted hat block `H_gg = X_g (X'WX)⁻¹ X_g' W_g`. They used the symmetric
+  hat matrix of the √w-transformed regression; on `Cigar.csv` weighted by
+  `Pop` and clustered by `State`, the variances change by up to 1.2%. A model fitted from matrices with a zero
+  weight throws an `ArgumentError` for these estimators.
+
+- **Multiway `CR2` and `CR3` work on IV models**, as on OLS models: the
+  inclusion–exclusion sum over cluster intersections, each term with its own
+  leverage adjustment, as in R `vcovCL`. They threw an `ArgumentError`.
 
 - **One finite-sample factor per estimator, the same on OLS and IV models fitted
   from a formula or from matrices.** The table is in the `vcov` docstring.
@@ -121,11 +131,10 @@
 
 - `CR2` and `CR3` on OLS models give the leverage-adjusted cluster variance
   `Σ_g X_g'(I - H_gg)^p u_g u_g'(I - H_gg)^p X_g` for any row order, with
-  weights, and with several cluster dimensions; the computation is that of
-  CovarianceMatrices 0.33. They were wrong when the rows of a cluster were not
-  contiguous (which includes every two-way clustering) and, for weighted
-  models, by a fraction of a percent, because the unweighted residuals were
-  combined with the weighted design. `CovarianceMatrices.momentresiduals` and
+  weights, and with several cluster dimensions. They were wrong when the rows
+  of a cluster were not contiguous (which includes every two-way clustering)
+  and, for weighted models, because the unweighted residuals were combined
+  with the weighted design. `CovarianceMatrices.momentresiduals` and
   `CovarianceMatrices.momentmatrix` return the weighted residuals and moments
   of a weighted OLS model.
 - `CR2` and `CR3` on IV models throw an `ArgumentError` when `I - H_gg` is

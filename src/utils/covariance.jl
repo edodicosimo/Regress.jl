@@ -370,6 +370,79 @@ function _moment_aVar(k, M; prewhite = false, kwargs...)
 end
 
 """
+    _leverage_aVar(k::Union{CR2, CR3}, X, Xh, B, u, w; demean, prewhite, scale)
+        -> CovarianceMatrix
+
+`aVar` of the CR2 or CR3 estimator `k` for a model whose design `X` and residuals `u`
+are multiplied by `√w`, with `w` empty for an unweighted model. The hat matrix is built
+from `Xh`, the columns of `X` with `B = inv(Xh'Xh)`.
+
+With `Z = X ./ √w` the untransformed design, each cluster's moments are
+`Z_g' (I - H_gg)^p (w_g .* e_g)`, with `p = -1/2` (CR2) or `p = -1` (CR3) and
+`H_gg = Z_g inv(Z'WZ) Z_g' W_g`. This is the convention of R's `sandwich::vcovCL` and of
+CovarianceMatrices. With several cluster dimensions, the result is the
+inclusion–exclusion sum of the CR0 meats of every intersection of dimensions, each with
+the adjustment of its own clusters, as in `vcovCL`.
+"""
+function _leverage_aVar(k::Union{CM.CR2, CM.CR3}, X, Xh, B, u, w; demean = false,
+        prewhite = false, scale = true)
+    name = nameof(typeof(k))
+    prewhite && throw(ArgumentError(
+        "`prewhite = true` is not supported by $name, which does not prewhiten."))
+    isempty(w) || all(>(0), w) ||
+        throw(ArgumentError(
+            "$name needs positive weights; the model has a weight of $(minimum(w))."))
+    gs = CM.clusters(k)
+    d = length(gs)
+    Ω = nothing
+    for s in 1:(2 ^ d - 1)
+        dims = [i for i in 1:d if isodd(s >> (i - 1))]
+        g = length(dims) == 1 ? gs[only(dims)] : CM.Clustering(gs[dims]...)
+        ũ = _leverage_adjusted_residuals(k, g, Xh, B, u, w)
+        A = parent(aVar(CM.CR0((g,)), X .* ũ; demean, scale))
+        A = isodd(length(dims)) ? A : -A
+        Ω = isnothing(Ω) ? A : Ω .+ A
+    end
+    return CovarianceMatrix(Ω, k, (nclusters = CM.nclusters(k),))
+end
+
+# The residuals `u` (of the √w-transformed model) with each cluster's block replaced
+# by `((I - H̃_gg)^p (w_g .* u_g)) ./ w_g`, where `H̃_gg = X_g B X_g'` is the block of
+# the symmetric hat matrix of the transformed design. Because
+# `I - H_gg = W_g^(-1/2) (I - H̃_gg) W_g^(1/2)`, multiplying these residuals by `X_g`
+# gives the moments of `_leverage_aVar`.
+function _leverage_adjusted_residuals(k, g, X, B, u, w)
+    Base.require_one_based_indexing(X, u, w)
+    name = nameof(typeof(k))
+    length(CM.groups(g)) == length(u) || throw(DimensionMismatch(
+        "the cluster variable has $(length(CM.groups(g))) observations, the model $(length(u))"))
+    rows = [Int[] for _ in 1:CM.nclusters(g)]
+    for (i, gi) in pairs(CM.groups(g))
+        push!(rows[gi], i)
+    end
+    p = k isa CM.CR2 ? -1 / 2 : -1
+    tol = sqrt(eps(real(float(eltype(X)))))
+    adj = float.(u)
+    for ind in rows
+        isempty(ind) && continue
+        Xg = view(X, ind, :)
+        λ, Q = eigen(Symmetric(I - Xg * B * Xg'))
+        minimum(λ) > tol || throw(ArgumentError(
+            "$name needs I - H_gg to be nonsingular for every cluster, but the cluster " *
+            "containing row $(first(ind)) has a hat-matrix eigenvalue of 1 (to within " *
+            "$tol). This happens when a regressor is nonzero only within one cluster, " *
+            "as with a cluster fixed effect."))
+        if isempty(w)
+            adj[ind] = Q * (λ .^ p .* (Q' * view(u, ind)))
+        else
+            wg = view(w, ind)
+            adj[ind] = (Q * (λ .^ p .* (Q' * (wg .* view(u, ind))))) ./ wg
+        end
+    end
+    return adj
+end
+
+"""
     CovarianceMatrices.momentmatrix(m::OLSEstimator)
 
 Returns the moment matrix `modelmatrix(m) .* momentresiduals(m)`, weighted for a
@@ -423,14 +496,10 @@ function _regress_aVar(k::K, m::OLSModel; demean = false, prewhite = false,
         return cluster_aVar_direct(X, y, mu, clustering; scale = scale)
     end
 
-    # CR2/CR3 adjust each cluster's residuals by its block of the hat matrix, and with
-    # several cluster dimensions each inclusion-exclusion term carries its own
-    # adjustment. CovarianceMatrices computes this from the regression-model protocol
-    # (`modelmatrix`, `momentresiduals`, `mask` and the empty `weights` above).
+    # The hat matrix of CR2/CR3 uses the estimable columns only.
     if K <: Union{CM.CR2, CM.CR3}
-        demean && throw(ArgumentError(
-            "aVar with $(nameof(K)) on an OLS model does not support `demean = true`"))
-        return invoke(CM.aVar, Tuple{CM.CR, RegressionModel}, k, m; prewhite, scale)
+        return _leverage_aVar(k, X, view(X, :, m.basis_coef), invchol(m.pp), y .- mu,
+            m.rr.wts; demean, prewhite, scale)
     end
 
     # Fallback: multi-way CR0/CR1, and `Cluster`
@@ -980,7 +1049,8 @@ on all four model types. `n` is the number of observations, `G` the number of cl
 
 `HC1` and `CR1` equal R fixest's defaults, and `CR0` equals fixest with
 `ssc(cluster.adj = FALSE)`. `CR2`, `CR3` and the HAC kernels equal R sandwich
-(`vcovCL`, `NeweyWest(adjust = TRUE)`). `Kc` counts the parameters as
+(`vcovCL`, `NeweyWest(adjust = TRUE)`), including weighted and multiway `CR2` and
+`CR3`. `Kc` counts the parameters as
 fixest does: the coefficients, plus, for each absorbed fixed effect, its number of
 levels, or 1 if it is nested in a cluster dimension, minus one for each fixed effect
 after the first. With several cluster dimensions, R `vcovCL` applies `G_d/(G_d-1)` to
