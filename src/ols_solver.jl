@@ -179,7 +179,7 @@ function fit_ols_core!(rr::OLSResponse{T}, X::Matrix{T},
     elseif factorization == :qr
         pp, beta_reduced = _fit_qr!(rr, X, X_reduced, basis_coef, save_matrices)
     else
-        error("factorization must be :chol, :qr, or :sweep, got :$factorization")
+        throw(ArgumentError("factorization must be :chol, :qr, or :sweep, got :$factorization"))
     end
 
     return pp, basis_coef, beta_reduced

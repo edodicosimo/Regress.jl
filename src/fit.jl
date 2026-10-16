@@ -475,6 +475,7 @@ function iv(estimator::TSLS, Z::AbstractMatrix{<:Real}, X::AbstractMatrix{<:Real
     ZZ_chol = try
         cholesky(Symmetric(ZZ))
     catch e
+        e isa PosDefException || rethrow()
         throw(ArgumentError("Instrument matrix Z is rank deficient or nearly singular"))
     end
     # Projected regressors: X̂ = P_Z * X = Z * (Z'Z)^{-1} * Z' * X
@@ -489,6 +490,7 @@ function iv(estimator::TSLS, Z::AbstractMatrix{<:Real}, X::AbstractMatrix{<:Real
     XhatX_chol = try
         cholesky(Symmetric(XhatX))
     catch e
+        e isa PosDefException || rethrow()
         throw(ArgumentError("X̂'X is singular - check for perfect collinearity"))
     end
 
@@ -498,15 +500,11 @@ function iv(estimator::TSLS, Z::AbstractMatrix{<:Real}, X::AbstractMatrix{<:Real
     XhatXhat = X_hat' * X_hat
     XhatXhat_chol = try
         cholesky(Symmetric(XhatXhat))
-    catch
-        # Fall back to pseudo-inverse
-        Symmetric(pinv(XhatXhat))
+    catch e
+        e isa PosDefException || rethrow()
+        throw(ArgumentError("X̂'X̂ is singular - check for perfect collinearity"))
     end
-    invXhatXhat = if XhatXhat_chol isa Cholesky
-        Symmetric(XhatXhat_chol \ I)
-    else
-        XhatXhat_chol  # Already a matrix from pinv
-    end
+    invXhatXhat = Symmetric(XhatXhat_chol \ I)
 
     # Residuals
     residuals = y_vec - X_mat * beta

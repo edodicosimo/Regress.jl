@@ -475,9 +475,9 @@ Required for post-estimation variance-covariance calculations.
 """
 function CovarianceMatrices.momentmatrix(m::IVEstimator)
     isnothing(m.postestimation) &&
-        error("Model does not have post-estimation data stored. Post-estimation vcov not available.")
+        throw(ArgumentError("Model does not have post-estimation data stored. Post-estimation vcov not available."))
     !has_residuals_data(m) &&
-        error("Model does not have residuals stored. Use save=:residuals or save=:all when fitting.")
+        throw(ArgumentError("Model does not have residuals stored. Use save=:residuals or save=:all when fitting."))
 
     # Use Adj if available (K-class: LIML, Fuller), otherwise use X (TSLS)
     pe = m.postestimation
@@ -511,7 +511,7 @@ _CM.numobs(m::IVEstimator) = m.nobs
 
 function _CM.mask(m::IVEstimator)
     isnothing(m.postestimation) &&
-        error("Model does not have post-estimation data stored. Post-estimation vcov not available.")
+        throw(ArgumentError("Model does not have post-estimation data stored. Post-estimation vcov not available."))
     return m.postestimation.basis_coef
 end
 
@@ -532,7 +532,8 @@ This matches R's AER::ivreg and sandwich::vcovHC for IV models.
 For K-class: Uses Adj matrix (stored in pe.Adj) when X is empty.
 """
 function StatsAPI.leverage(m::IVEstimator)
-    isnothing(m.postestimation) && error("Model does not have post-estimation data stored.")
+    isnothing(m.postestimation) &&
+        throw(ArgumentError("Model does not have post-estimation data stored."))
     pe = m.postestimation
 
     # For K-class estimators, use the Adj matrix if available
@@ -611,8 +612,9 @@ end
 # The moment matrix of an IV model has the second-stage regressors (`Adj` for the
 # K-class estimators, the fitted regressors otherwise) times the residuals.
 function _regress_aVar(k, m::IVEstimator; demean = false, prewhite = false, scale = true)
-    isnothing(m.postestimation) && error("Model does not have post-estimation data stored.")
-    !has_residuals_data(m) && error("Model does not have residuals stored.")
+    isnothing(m.postestimation) &&
+        throw(ArgumentError("Model does not have post-estimation data stored."))
+    !has_residuals_data(m) && throw(ArgumentError("Model does not have residuals stored."))
 
     # Compute adjusted moment matrix
     # Use Adj if available (K-class: LIML, Fuller), otherwise use X (TSLS)
@@ -633,8 +635,9 @@ end
 
 function _regress_aVar(k::_CM.CR, m::IVEstimator; demean = false, prewhite = false,
         scale = true)
-    isnothing(m.postestimation) && error("Model does not have post-estimation data stored.")
-    !has_residuals_data(m) && error("Model does not have residuals stored.")
+    isnothing(m.postestimation) &&
+        throw(ArgumentError("Model does not have post-estimation data stored."))
+    !has_residuals_data(m) && throw(ArgumentError("Model does not have residuals stored."))
 
     # Compute adjusted moment matrix
     # Use Adj if available (K-class: LIML, Fuller), otherwise use X (TSLS)
@@ -665,9 +668,9 @@ end
 function _regress_vcov(ve, m::IVEstimator{T}; dofadjust = true, demean = false,
         prewhite = false) where {T}
     isnothing(m.postestimation) &&
-        error("Model does not have post-estimation data stored. Post-estimation vcov not available.")
+        throw(ArgumentError("Model does not have post-estimation data stored. Post-estimation vcov not available."))
     !has_residuals_data(m) &&
-        error("Model does not have residuals stored. Use save=:residuals or save=:all when fitting.")
+        throw(ArgumentError("Model does not have residuals stored. Use save=:residuals or save=:all when fitting."))
 
     n = nobs(m)
     B = bread(m)
@@ -681,7 +684,7 @@ end
 # Driscoll-Kraay: see the `_regress_vcov` methods for OLS models.
 function _regress_vcov(k::_CM.DriscollKraay, m::IVEstimator; kwargs...)
     isnothing(m.postestimation) &&
-        error("Model does not have post-estimation data stored. Post-estimation vcov not available.")
+        throw(ArgumentError("Model does not have post-estimation data stored. Post-estimation vcov not available."))
     Σ = invoke(
         StatsBase.vcov, Tuple{_CM.DriscollKraay, RegressionModel}, k, m; kwargs...)
     return _wrap_vcov(Σ, k, nothing)
@@ -710,14 +713,14 @@ end
 function _cluster_not_found_error(cluster_name::Symbol, m::IVEstimator)
     available = isempty(m.postestimation.cluster_vars) ? "none" :
                 join(keys(m.postestimation.cluster_vars), ", :")
-    error("\n    Cluster variable :$cluster_name not found in model.
+    throw(ArgumentError("\n    Cluster variable :$cluster_name not found in model.
 
     Available cluster variables: :$available
 
     To use this cluster variable, either:
       1. Re-fit with save_cluster=:$cluster_name
       2. Use data directly: vcov(CR1(df.$cluster_name[model.esample]), model)
-    ")
+    "))
 end
 
 ##############################################################################
@@ -984,9 +987,9 @@ See also: [`FirstStageResult`](@ref)
 """
 function first_stage(m::IVEstimator{T}) where {T}
     isnothing(m.postestimation) &&
-        error("Model does not have post-estimation data stored. Fit with save=true.")
+        throw(ArgumentError("Model does not have post-estimation data stored. Fit with save=true."))
     !has_first_stage_data(m.postestimation.first_stage_data) &&
-        error("First-stage data not available.")
+        throw(ArgumentError("First-stage data not available."))
 
     fsd = m.postestimation.first_stage_data
 
@@ -1755,7 +1758,7 @@ function first_stage(m::IVMatrixEstimator{T};
         instrument_names::Union{Vector{String}, Nothing} = nothing) where {T}
     pe = m.postestimation
     n_endo = pe.n_endogenous
-    n_endo > 0 || error("Model has no endogenous variables.")
+    n_endo > 0 || throw(ArgumentError("Model has no endogenous variables."))
 
     X = pe.X
     Z = pe.Z

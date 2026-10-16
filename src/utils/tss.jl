@@ -75,7 +75,8 @@ function Fstat(coef::AbstractVector{T}, matrix_vcov::AbstractMatrix{T},
     end
     try
         return (coefF' * (matrix_vcov \ coefF)) / length(coefF)
-    catch
+    catch e
+        _isnumericalfailure(e) || rethrow()
         @info "The variance-covariance matrix is not invertible. F-statistic not computed"
         return T(NaN)
     end

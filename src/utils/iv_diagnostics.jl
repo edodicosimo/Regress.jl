@@ -143,9 +143,10 @@ This matches fixest's `fitstat(m, "ivf1")`.
 """
 function first_stage_f(m::IVEstimator{T}) where {T}
     pe = m.postestimation
-    isnothing(pe) && error("No post-estimation data. Fit with save != :minimal.")
+    isnothing(pe) &&
+        throw(ArgumentError("No post-estimation data. Fit with save != :minimal."))
     fsd = pe.first_stage_data
-    has_first_stage_data(fsd) || error("First-stage data not available.")
+    has_first_stage_data(fsd) || throw(ArgumentError("First-stage data not available."))
 
     F_per_endo, p_per_endo, df1, df2 = _compute_first_stage_f_iid(fsd, m.nobs, m.dof_fes)
 
@@ -176,9 +177,10 @@ This matches fixest's Wu-Hausman statistic.
 """
 function wu_hausman(m::IVEstimator{T}) where {T}
     pe = m.postestimation
-    isnothing(pe) && error("No post-estimation data. Fit with save != :minimal.")
+    isnothing(pe) &&
+        throw(ArgumentError("No post-estimation data. Fit with save != :minimal."))
     fsd = pe.first_stage_data
-    has_first_stage_data(fsd) || error("First-stage data not available.")
+    has_first_stage_data(fsd) || throw(ArgumentError("First-stage data not available."))
 
     k_endo = length(fsd.endogenous_names)
     y = pe.y
@@ -226,15 +228,16 @@ This matches fixest's Sargan statistic.
 """
 function sargan(m::IVEstimator{T}) where {T}
     pe = m.postestimation
-    isnothing(pe) && error("No post-estimation data. Fit with save != :minimal.")
+    isnothing(pe) &&
+        throw(ArgumentError("No post-estimation data. Fit with save != :minimal."))
     fsd = pe.first_stage_data
-    has_first_stage_data(fsd) || error("First-stage data not available.")
+    has_first_stage_data(fsd) || throw(ArgumentError("First-stage data not available."))
 
     k_endo = length(fsd.endogenous_names)
     n_excl = size(fsd.Z_res, 2)
 
-    n_excl > k_endo || error(
-        "Sargan test requires overidentification (n_instruments=$n_excl > n_endogenous=$k_endo).")
+    n_excl > k_endo || throw(ArgumentError(
+        "Sargan test requires overidentification (n_instruments=$n_excl > n_endogenous=$k_endo)."))
 
     # Second-stage residuals using original X
     coef_full = copy(m.coef)

@@ -105,11 +105,13 @@ end
 
     # m12: 2 endo, 2 instruments — exactly identified, should error
     m12 = Regress.iv(Regress.TSLS(), df, @formula(y ~ (x + x2 ~ z1 + z2)))
-    @test_throws ErrorException sargan(m12)
+    @test_throws ArgumentError sargan(m12)
+    @test_throws "Sargan test requires overidentification" sargan(m12)
 
     # m22: 2 endo, 2 instruments, FE — exactly identified, should error
     m22 = Regress.iv(Regress.TSLS(), df, @formula(y ~ (x + x2 ~ z1 + z2) + fe(a)))
-    @test_throws ErrorException sargan(m22)
+    @test_throws ArgumentError sargan(m22)
+    @test_throws "Sargan test requires overidentification" sargan(m22)
 end
 
 @testitem "AbstractTest interface" tags = [:iv, :validation] begin

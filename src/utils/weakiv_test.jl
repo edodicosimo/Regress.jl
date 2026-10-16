@@ -118,14 +118,14 @@ function weakivtest(m::IVEstimator{T}; level::Real = 0.05, tol::Real = 0.001,
     # Validate
     pe = m.postestimation
     isnothing(pe) &&
-        error("Model does not have post-estimation data. Re-fit with save=true.")
+        throw(ArgumentError("Model does not have post-estimation data. Re-fit with save=true."))
     fsd = pe.first_stage_data
     !has_first_stage_data(fsd) &&
-        error("First-stage data not available. Re-fit with save=true.")
+        throw(ArgumentError("First-stage data not available. Re-fit with save=true."))
 
     n_endo = size(fsd.Xendo_res, 2)
     n_endo == 1 ||
-        error("weakivtest requires exactly one endogenous regressor, got $n_endo.")
+        throw(ArgumentError("weakivtest requires exactly one endogenous regressor, got $n_endo."))
 
     k = _weakiv_estimator(m)
 
@@ -172,7 +172,7 @@ function weakivtest(m::IVMatrixEstimator{T}; level::Real = 0.05, tol::Real = 0.0
     pe = m.postestimation
     n_endo = pe.n_endogenous
     n_endo == 1 ||
-        error("weakivtest requires exactly one endogenous regressor, got $n_endo.")
+        throw(ArgumentError("weakivtest requires exactly one endogenous regressor, got $n_endo."))
     k = _weakiv_estimator(m)
 
     X_orig = pe.X              # [Xexo, Xendo]

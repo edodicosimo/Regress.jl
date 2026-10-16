@@ -152,7 +152,8 @@ end
     df = DataFrame(y = y, x1 = x1, x2 = x2, z1 = z1, z2 = z2, z3 = z3)
 
     m = Regress.iv(Regress.TSLS(), df, @formula(y ~ (x1 + x2 ~ z1 + z2 + z3)))
-    @test_throws ErrorException Regress.weakivtest(m)
+    @test_throws ArgumentError Regress.weakivtest(m)
+    @test_throws "weakivtest requires exactly one endogenous regressor, got 2" Regress.weakivtest(m)
 end
 
 @testitem "weakivtest: tol keyword" tags = [:iv, :weakiv] begin

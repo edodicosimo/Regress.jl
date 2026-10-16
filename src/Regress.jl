@@ -15,7 +15,7 @@ using FixedEffects: FixedEffects, AbstractFixedEffectSolver, FixedEffect,
 using LinearAlgebra: LinearAlgebra, BLAS, Cholesky, ColumnNorm, Hermitian, I,
                      LAPACKException, PosDefException, SingularException,
                      Symmetric, UpperTriangular, cholesky, cholesky!, diag,
-                     diagm, dot, eigen, eigvals, issuccess, mul!, pinv, qr,
+                     diagm, dot, eigen, eigvals, issuccess, mul!, qr,
                      rank, rmul!, svd, tr
 using PrecompileTools: PrecompileTools, @compile_workload
 using Printf: Printf, @printf, @sprintf

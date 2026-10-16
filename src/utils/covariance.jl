@@ -604,7 +604,8 @@ end
 _cr_moment_ncols(m::OLSModel) = size(modelmatrix(m), 2)
 function _cr_moment_ncols(m::IVEstimator)
     pe = m.postestimation
-    isnothing(pe) && error("Model does not have post-estimation data stored.")
+    isnothing(pe) &&
+        throw(ArgumentError("Model does not have post-estimation data stored."))
     return size(has_kclass_adj(pe) ? pe.Adj : pe.X_fitted, 2)
 end
 _cr_moment_ncols(m::IVMatrixEstimator) = size(m.postestimation.X_hat, 2)
@@ -643,7 +644,7 @@ end
 # Error message for missing cluster variable
 function _cluster_not_found_error(cluster_name::Symbol, m::OLSEstimator)
     available = isempty(m.fes.clusters) ? "none" : join(keys(m.fes.clusters), ", :")
-    error("""
+    throw(ArgumentError("""
     Cluster variable :$cluster_name not found in model.
 
     Available cluster variables: :$available
@@ -651,7 +652,7 @@ function _cluster_not_found_error(cluster_name::Symbol, m::OLSEstimator)
     To use this cluster variable, either:
       1. Re-fit with save_cluster=:$cluster_name
       2. Use data directly: vcov(CR1(df.$cluster_name[model.esample]), model)
-    """)
+    """))
 end
 
 """

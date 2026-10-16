@@ -204,25 +204,25 @@ end
 
 function StatsAPI.response(m::OLSMatrixEstimator)
     has_response_data(m.rr) ||
-        error("Response vector not stored.")
+        throw(ArgumentError("Response vector not stored."))
     return m.rr.y
 end
 
 function StatsAPI.fitted(m::OLSMatrixEstimator)
     has_response_data(m.rr) ||
-        error("Fitted values not stored.")
+        throw(ArgumentError("Fitted values not stored."))
     return m.rr.mu
 end
 
 function StatsAPI.modelmatrix(m::OLSMatrixEstimator)
     has_predictor_data(m.pp) ||
-        error("Model matrix not stored.")
+        throw(ArgumentError("Model matrix not stored."))
     return m.pp.X
 end
 
 function StatsAPI.residuals(m::OLSMatrixEstimator)
     has_response_data(m.rr) ||
-        error("Response vector not stored. Cannot compute residuals.")
+        throw(ArgumentError("Response vector not stored. Cannot compute residuals."))
     resid = m.rr.y .- m.rr.mu
     # Unweight residuals if model was estimated with weights
     if isweighted(m.rr)
@@ -317,26 +317,26 @@ StatsAPI.responsename(m::OLSEstimator) = m.rr.response_name
 
 function StatsAPI.response(m::OLSEstimator)
     has_response_data(m.rr) ||
-        error("Response vector not stored. Model was fit with save=:minimal.")
+        throw(ArgumentError("Response vector not stored. Model was fit with save=:minimal."))
     return m.rr.y
 end
 
 function StatsAPI.fitted(m::OLSEstimator)
     has_response_data(m.rr) ||
-        error("Fitted values not stored. Model was fit with save=:minimal.")
+        throw(ArgumentError("Fitted values not stored. Model was fit with save=:minimal."))
     return m.rr.mu
 end
 
 function StatsAPI.modelmatrix(m::OLSEstimator)
     has_predictor_data(m.pp) ||
-        error("Model matrix not stored. Model was fit with save=:minimal.")
+        throw(ArgumentError("Model matrix not stored. Model was fit with save=:minimal."))
     return m.pp.X
 end
 
 # Residuals (compute from y - mu, unweighted)
 function StatsAPI.residuals(m::OLSEstimator)
     has_response_data(m.rr) ||
-        error("Response vector not stored. Model was fit with save=:minimal. Cannot compute residuals.")
+        throw(ArgumentError("Response vector not stored. Model was fit with save=:minimal. Cannot compute residuals."))
     resid = m.rr.y .- m.rr.mu
     # Unweight residuals if model was estimated with weights
     if isweighted(m.rr)

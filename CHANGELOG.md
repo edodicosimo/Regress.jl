@@ -86,6 +86,17 @@
   and W subtract the fixed-effect levels from the degrees of freedom. `F_robust`
   equals `first_stage_F_robust` and fixest `ivwald1` under the same estimator.
 
+- **Invalid input throws `ArgumentError`, not `ErrorException`.** This covers
+  accessors on models fitted with `save = :minimal`, cluster variables not saved
+  at fit time, `sargan` on an exactly identified model, and `weakivtest` with
+  more than one endogenous regressor. The messages are unchanged.
+
+- **The matrix IV fit throws an `ArgumentError` when X̂'X̂ is singular.** It
+  used a pseudo-inverse for the variance without a warning. Numerical fallbacks
+  (the F statistic's `NaN`, the LIML eigenvalue regularization) apply only to
+  `PosDefException`, `SingularException` and `LAPACKException`; any other error
+  propagates.
+
 ### Fixed
 
 - The first-stage statistics no longer turn every exception into `NaN`. Only a

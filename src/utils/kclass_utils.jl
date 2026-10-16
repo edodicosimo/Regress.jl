@@ -92,7 +92,8 @@ function _liml_kappa(
     # LIML kappa is the smallest eigenvalue
     vals = try
         eigvals(M1, M2)
-    catch
+    catch e
+        _isnumericalfailure(e) || rethrow()
         # Add small regularization if M2 is singular/ill-conditioned
         tau = max(eps(T) * tr(M2), T(1e-12))
         eigvals(M1, Symmetric(Matrix(M2) + tau * I))
