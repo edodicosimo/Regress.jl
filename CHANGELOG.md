@@ -39,6 +39,12 @@
   slopes gives 160.36, at fit time and after `+ vcov(...)`, for TSLS and the
   k-class estimators.
 
+- Formula IV fits with `double_precision = false` run, and their coefficients
+  and default variance are `Float32`. TSLS threw a `MethodError` from
+  `BLAS.syrk!` because the sweep operator's buffer was always `Float64`, and
+  LIML and Fuller threw a `MethodError` because their default variance was
+  promoted to `Float64`.
+
 - `CR2` and `CR3` on OLS models give the leverage-adjusted cluster variance
   `Σ_g X_g'(I - H_gg)^p u_g u_g'(I - H_gg)^p X_g` for any row order, with
   weights, and with several cluster dimensions; the computation is that of

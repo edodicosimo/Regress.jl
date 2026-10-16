@@ -447,7 +447,7 @@ function fit_kclass_estimator(
     # Compute HC1 vcov: invA * (Adj .* u)' * (Adj .* u) * invA * scale
     n = nobs_eff
     k = size(X, 2)
-    scale = n / dof_residual
+    scale = T(n / dof_residual)
 
     M = Adj_reordered .* residuals_raw
     meat = M' * M

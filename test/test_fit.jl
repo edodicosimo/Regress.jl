@@ -893,6 +893,24 @@ end
     end
 end
 
+@testitem "IV formula fit in Float32" tags = [:iv, :kclass] begin
+    using Regress, CSV, DataFrames, StatsBase
+    using Regress: fe, iv, TSLS, LIML, Fuller
+
+    df = DataFrame(CSV.File(joinpath(dirname(pathof(Regress)), "../dataset/Cigar.csv")))
+    for f in (@formula(Sales ~ NDI + (Price ~ Pimin)),
+        @formula(Sales ~ NDI + (Price ~ Pimin) + fe(State)))
+        for est in (TSLS(), LIML(), Fuller(1.0))
+            m32 = iv(est, df, f; double_precision = false)
+            m64 = iv(est, df, f)
+            @test eltype(coef(m32)) == Float32
+            @test eltype(vcov(m32)) == Float32
+            @test coef(m32) ≈ coef(m64) rtol = 1e-4
+            @test stderror(m32) ≈ stderror(m64) rtol = 1e-4
+        end
+    end
+end
+
 @testitem "missing values" tags = [:ols, :smoke] begin
     using Regress, CategoricalArrays, DataFrames
     using Regress: fe
