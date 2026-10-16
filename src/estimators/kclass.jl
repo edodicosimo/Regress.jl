@@ -463,9 +463,9 @@ function fit_kclass_estimator(
     p_values = 2 .* tdistccdf.(dof_residual, abs.(t_stats))
 
     # Compute robust F-statistic (Wald test)
-    has_int = hasintercept(data_prep.formula_origin)
     F_stat_robust,
-    p_val_robust = compute_robust_fstat(coef_full, vcov_matrix, has_int, dof_residual)
+    p_val_robust = compute_robust_fstat(
+        coef_full, vcov_matrix, data_prep.has_intercept, dof_residual)
 
     # Default vcov estimator (HC1)
     default_vcov = CovarianceMatrices.HC1()

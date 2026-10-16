@@ -396,7 +396,7 @@ end
 has_iv(::IVEstimator) = true
 has_fe(m::IVEstimator) = has_fe(m.formula)
 r2_within(m::IVEstimator) = m.r2_within
-model_hasintercept(m::IVEstimator) = hasintercept(m.formula)
+model_hasintercept(m::IVEstimator) = hasintercept(m.formula_schema)
 
 """
     has_residuals_data(m::IVEstimator) -> Bool
@@ -1860,6 +1860,8 @@ StatsAPI.nobs(m::IVMatrixEstimator) = m.nobs
 StatsAPI.dof(m::IVMatrixEstimator) = m.dof
 StatsAPI.dof_residual(m::IVMatrixEstimator) = m.dof_residual
 StatsAPI.rss(m::IVMatrixEstimator) = m.rss
+StatsAPI.deviance(m::IVMatrixEstimator) = m.rss
+StatsAPI.nulldeviance(m::IVMatrixEstimator) = m.tss
 StatsAPI.r2(m::IVMatrixEstimator) = m.r2
 
 function StatsAPI.response(m::IVMatrixEstimator)

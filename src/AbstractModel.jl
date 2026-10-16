@@ -99,22 +99,23 @@ function nullloglikelihood_within(m::AbstractRegressModel)
     end
 end
 
+# The parameter count is `nobs - dof_residual`: estimated coefficients plus
+# absorbed fixed-effect levels. `dof(model)` cannot stand in for it, because
+# OLS counts the intercept in `dof` while IV does not.
 function StatsAPI.adjr2(model::AbstractRegressModel, variant::Symbol = :devianceratio)
-    has_int = model_hasintercept(model)
-    k = dof(model) + dof_fes(model) + has_int
+    n = nobs(model)
+    # The null model fits one parameter when the null deviance is centered
+    centered = model_hasintercept(model) | has_fe(model)
 
     if variant == :McFadden
-        has_fe_val = has_fe(model)
-        k = k - has_int - has_fe_val
+        k = n - dof_residual(model) - centered
         ll = loglikelihood(model)
         ll0 = nullloglikelihood(model)
         1 - (ll - k)/ll0
     elseif variant == :devianceratio
-        n = nobs(model)
         dev = deviance(model)
         dev0 = nulldeviance(model)
-        has_fe_val = has_fe(model)
-        1 - (dev*(n - (has_int | has_fe_val))) / (dev0 * max(n - k, 1))
+        1 - (dev * (n - centered)) / (dev0 * dof_residual(model))
     else
         throw(ArgumentError("variant must be one of :McFadden or :devianceratio"))
     end

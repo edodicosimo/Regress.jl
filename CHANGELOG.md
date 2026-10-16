@@ -26,6 +26,19 @@
 
 ### Fixed
 
+- `adjr2` on formula-fitted OLS models counts the intercept once. It counted
+  it twice, so `Sales ~ NDI + Price` on the Cigar data gave 0.207082 where R
+  `lm` gives 0.207657. The `:McFadden` variant had the same error. `adjr2` now
+  equals R `lm`, fixest `ar2`/`apr2` and AER `ivreg` on OLS and IV models,
+  formula and matrix, with and without an intercept. It also works on IV models
+  fitted from matrices, which threw a `MethodError`.
+
+- The model F-statistic of a formula-fitted IV model no longer includes the
+  intercept in the Wald test when the intercept is implicit, as in
+  `Sales ~ NDI + (Price ~ Pimin)`. It reported 10045.6 where the test of the
+  slopes gives 160.36, at fit time and after `+ vcov(...)`, for TSLS and the
+  k-class estimators.
+
 - `CR2` and `CR3` on OLS models give the leverage-adjusted cluster variance
   `Σ_g X_g'(I - H_gg)^p u_g u_g'(I - H_gg)^p X_g` for any row order, with
   weights, and with several cluster dimensions; the computation is that of

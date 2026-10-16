@@ -573,12 +573,65 @@ end
     m = @formula Sales ~ Price
     x = Regress.ols(df, m)
     @test r2(x) ≈ 0.0969 atol = 1e-4
-    @test adjr2(x) ≈ 0.0956 atol = 1e-3  # Updated: Small DOF convention differences
+    @test adjr2(x) ≈ 0.096226189539 atol = 1e-10  # R lm
 
     m = @formula Sales ~ Price + Pimin + fe(State)
     x = Regress.ols(df, m)
     @test r2(x) ≈ 0.77472 atol = 1e-4
     @test adjr2(x) ≈ 0.766768 atol = 1e-4
+end
+
+@testitem "Adjusted R² counts each parameter once" tags = [:ols, :iv, :statistics] begin
+    using Regress, CSV, DataFrames
+    using Regress: fe, TSLS, LIML, HC1
+
+    df = DataFrame(CSV.File(joinpath(dirname(pathof(Regress)), "../dataset/Cigar.csv")))
+    df.w = 0.5 .+ mod.(1:nrow(df), 10) ./ 10
+    X = hcat(ones(nrow(df)), df.NDI, df.Price)
+    Z = hcat(ones(nrow(df)), df.NDI, df.Pimin)
+    y = float.(df.Sales)
+
+    # References: R `summary(lm(...))$adj.r.squared`, fixest `r2(m, "ar2")` and
+    # `r2(m, "apr2")`, and AER `summary(ivreg(...))$adj.r.squared`.
+    ols = Regress.ols(df, @formula(Sales ~ NDI + Price))
+    @test adjr2(ols) ≈ 0.207657307434 atol = 1e-10
+    @test adjr2(ols, :McFadden) ≈ 0.023835638284 atol = 1e-10
+    @test adjr2(Regress.ols(X, y)) ≈ adjr2(ols) atol = 1e-12
+
+    ols0 = Regress.ols(df, @formula(Sales ~ 0 + NDI + Price))
+    @test adjr2(ols0) ≈ 0.634915861028 atol = 1e-10
+    @test adjr2(Regress.ols(X[:, 2:3], y; has_intercept = false)) ≈ adjr2(ols0) atol = 1e-12
+
+    olsw = Regress.ols(df, @formula(Sales ~ NDI + Price), weights = :w)
+    @test adjr2(olsw) ≈ 0.216144101230 atol = 1e-10
+
+    olsfe = Regress.ols(df, @formula(Sales ~ NDI + Price + fe(State)))
+    @test adjr2(olsfe) ≈ 0.765580468783 atol = 1e-10
+    @test adjr2(olsfe, :McFadden) ≈ 0.146035019743 atol = 1e-10
+
+    ivm = Regress.iv(TSLS(), df, @formula(Sales ~ NDI + (Price ~ Pimin)))
+    @test adjr2(ivm) ≈ 0.201517216621 atol = 1e-10
+    ivmat = Regress.iv(TSLS(), Z, X, y; has_intercept = true, n_endogenous = 1)
+    @test adjr2(ivmat) ≈ 0.201517216621 atol = 1e-10
+
+    iv0 = Regress.iv(TSLS(), df, @formula(Sales ~ 0 + NDI + (Price ~ Pimin)))
+    @test adjr2(iv0) ≈ 0.633269128828 atol = 1e-10
+    iv0mat = Regress.iv(
+        TSLS(), Z[:, 2:3], X[:, 2:3], y; has_intercept = false, n_endogenous = 1)
+    @test adjr2(iv0mat) ≈ adjr2(iv0) atol = 1e-12
+
+    ivfe = Regress.iv(TSLS(), df, @formula(Sales ~ NDI + (Price ~ Pimin) + fe(State)))
+    @test adjr2(ivfe, :McFadden) ≈ 0.145578863149 atol = 1e-10
+
+    # The model F of an IV fit with an implicit intercept tests the slopes only,
+    # at fit time and after `+ vcov(...)`. TSLS reference: fixest `wald()`, HC1.
+    @test Regress.model_hasintercept(ivm)
+    @test ivm.F ≈ 160.3554224586 rtol = 1e-8
+    @test (ivm + vcov(HC1())).F ≈ ivm.F rtol = 1e-10
+    liml = Regress.iv(LIML(), df, @formula(Sales ~ NDI + (Price ~ Pimin + Pop)))
+    b, V = coef(liml), vcov(HC1(), liml)
+    @test liml.F ≈ (b[2:3]' * (V[2:3, 2:3] \ b[2:3])) / 2 rtol = 1e-8
+    @test (liml + vcov(HC1())).F ≈ liml.F rtol = 1e-10
 end
 
 @testitem "F-statistics" tags = [:ols, :iv, :statistics] begin
@@ -602,7 +655,7 @@ end
 
     m = @formula Sales ~ (Price ~ Pimin)
     x = Regress.iv(Regress.TSLS(), df, m)
-    @test x.F ≈ 13601.92 atol = 1.0  # Robust Wald F with HC1
+    @test x.F ≈ 153.3428553403 rtol = 1e-8  # fixest wald(), HC1, slopes only
 
     m = @formula Sales ~ Price + Pop
     x = Regress.ols(df, m)
@@ -673,14 +726,14 @@ end
     @test loglikelihood(x) ≈ -6625.8266 atol = 1e-4
     @test nullloglikelihood(x) ≈ -6696.1387 atol = 1e-4
     @test r2(x, :McFadden) ≈ 0.01050 atol = 1e-4 # Pseudo R2 in R fixest
-    @test adjr2(x, :McFadden) ≈ 0.0102 atol = 1e-3  # Updated: Small DOF differences
+    @test adjr2(x, :McFadden) ≈ 0.010351054111 atol = 1e-10  # fixest apr2
 
     m = @formula(Sales ~ Price + Pimin)
     x = Regress.ols(df, m)
     @test loglikelihood(x) ≈ -6598.6300 atol = 1e-4
     @test nullloglikelihood(x) ≈ -6696.1387 atol = 1e-4
     @test r2(x, :McFadden) ≈ 0.01456 atol = 1e-4 # Pseudo R2 in R fixest
-    @test adjr2(x, :McFadden) ≈ 0.0141 atol = 1e-3  # Updated: Small DOF differences
+    @test adjr2(x, :McFadden) ≈ 0.014263246416 atol = 1e-10  # fixest apr2
 
     m = @formula(Sales ~ Price + Pimin + fe(State))
     x = Regress.ols(df, m)

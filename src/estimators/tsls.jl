@@ -358,7 +358,7 @@ end
 
 """
     _iv_compute_inference(Xhat, residuals_raw, invXhatXhat, basis_coef, coef,
-                          nobs, dof_model, dof_fes, dof_residual, formula_origin, T)
+                          nobs, dof_model, dof_fes, dof_residual, has_intercept, T)
 
 Compute vcov matrix, standard errors, t-stats, p-values, and robust F-stat.
 """
@@ -366,7 +366,7 @@ function _iv_compute_inference(
         Xhat::Matrix{T}, residuals_raw::Vector{T},
         invXhatXhat::Symmetric{T}, basis_coef::BitVector, coef::Vector{T},
         nobs::Int, dof_model::Int, dof_fes::Int, dof_residual::Int,
-        formula_origin
+        has_intercept::Bool
 ) where {T}
     # Compute HC1 vcov
     vcov_matrix = compute_hc1_vcov_direct_iv(
@@ -384,9 +384,8 @@ function _iv_compute_inference(
     p_values = 2 .* tdistccdf.(dof_residual, abs.(t_stats))
 
     # Robust F-statistic
-    has_int = hasintercept(formula_origin)
     F_stat_robust,
-    p_val_robust = compute_robust_fstat(coef_full, vcov_matrix, has_int, dof_residual)
+    p_val_robust = compute_robust_fstat(coef_full, vcov_matrix, has_intercept, dof_residual)
 
     return (vcov_matrix = vcov_matrix, se = se, t_stats = t_stats,
         p_values = p_values, F_stat_robust = F_stat_robust,
@@ -740,7 +739,7 @@ function fit_tsls(@nospecialize(df),
 
     inf = _iv_compute_inference(
         convert(Matrix{T}, Xhat), residuals_raw, invXhatXhat, basis_coef, coef,
-        nobs_eff, dof_model, dof_fes, dof_residual, data_prep.formula_origin)
+        nobs_eff, dof_model, dof_fes, dof_residual, data_prep.has_intercept)
 
     ##########################################################################
     ## Return IVEstimator
