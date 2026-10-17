@@ -1,10 +1,53 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 ### Breaking Changes
 
-- **Requires CovarianceMatrices 0.33.**
+- **Requires CovarianceMatrices 0.33.** Regress uses its public extension
+  functions for packages that form their own moment matrices, which earlier
+  versions lack.
+
+- **Requires Julia 1.12.** CovarianceMatrices 0.33 sets this floor, which rules
+  out the 1.10 long-term-support release.
+
+- **`vcov(model)` returns a `CovarianceMatrix`** instead of
+  `Symmetric{T,Matrix{T}}`. It is still an `AbstractMatrix`, so indexing,
+  `inv`, `\`, and factorizations are unchanged, but the result now carries the
+  metadata of the estimate: `estimator(V)` gives the variance estimator,
+  `bandwidth(V)` the selected HAC bandwidth, `kernelweights(V)` the per-column
+  kernel weights, `information(V)` the full metadata `NamedTuple`, and
+  `parent(V)` the bare matrix. Code that stores the result in a
+  `Matrix`- or `Symmetric`-typed field needs updating; code that only reads
+  values does not.
+
+- **`weakivtest` takes `tol` instead of `eps`.** The old name shadowed
+  `Base.eps` in the method body. `weakivtest(m; eps = ...)` now errors.
+
+- **`IVMatrixEstimator` carries the estimator it was fitted with.** The type is
+  now `IVMatrixEstimator{T, E, V, C}`, with a leading `estimator::E` field, so
+  that leverage and display can dispatch on it. Code that writes the type with
+  all its parameters, or constructs one positionally, needs updating;
+  `M <: IVMatrixEstimator` bounds and field access by name are unaffected.
+
+- **`LagTerm` is public rather than exported.** It names the type behind
+  `lags(...)` and is not meant to be constructed directly, so `using Regress`
+  no longer brings it into scope. Use `Regress.LagTerm` where you need the
+  name; `lags` itself is unchanged.
+
+- **Invalid input raises `ArgumentError`.** Validation failures previously
+  threw bare strings, which `throw` wraps in `ErrorException`, or called
+  `error`. This includes accessors on models fitted with `save = :minimal`,
+  cluster variables not saved at fit time, `sargan` on an exactly identified
+  model, and `weakivtest` with more than one endogenous regressor. Messages are
+  unchanged, but `catch`/`@test_throws` clauses matching on the exception type
+  need updating.
+
+- **The matrix API rejects offset arrays.** `ols(X, y)` and
+  `iv(::TSLS, Z, X, y)` index positionally after converting their arguments,
+  so they now declare `Base.require_one_based_indexing`. `view`s and ordinary
+  arrays are unaffected; an `OffsetArray` argument errors at the entry point
+  instead of producing a misaligned fit.
 
 - **`vcov(DriscollKraay(...), model)` takes no `type` keyword.** The
   small-sample correction is set on the estimator:
@@ -26,14 +69,11 @@
 
 - **Weighted `CR2` and `CR3` follow R `sandwich::vcovCL`** on OLS and IV
   models: each cluster's moments are `X_g'(I - H_gg)^p (w_g .* e_g)` with the
-  weighted hat block `H_gg = X_g (X'WX)⁻¹ X_g' W_g`. They used the symmetric
-  hat matrix of the √w-transformed regression; on `Cigar.csv` weighted by
-  `Pop` and clustered by `State`, the variances change by up to 1.2%. A model fitted from matrices with a zero
-  weight throws an `ArgumentError` for these estimators.
-
-- **Multiway `CR2` and `CR3` work on IV models**, as on OLS models: the
-  inclusion–exclusion sum over cluster intersections, each term with its own
-  leverage adjustment, as in R `vcovCL`. They threw an `ArgumentError`.
+  weighted hat block `H_gg = X_g (X'WX)⁻¹ X_g' W_g`. They weighted the
+  per-cluster leverage blocks twice, which drove `I - H_gg` indefinite and
+  produced standard errors roughly an order of magnitude too large (and, for
+  CR2, an `InexactError` on some data). A model fitted from matrices with a
+  zero weight throws an `ArgumentError` for these estimators.
 
 - **One finite-sample factor per estimator, the same on OLS and IV models fitted
   from a formula or from matrices.** The table is in the `vcov` docstring.
@@ -86,24 +126,56 @@
   and W subtract the fixed-effect levels from the degrees of freedom. `F_robust`
   equals `first_stage_F_robust` and fixest `ivwald1` under the same estimator.
 
-- **Invalid input throws `ArgumentError`, not `ErrorException`.** This covers
-  accessors on models fitted with `save = :minimal`, cluster variables not saved
-  at fit time, `sargan` on an exactly identified model, and `weakivtest` with
-  more than one endogenous regressor. The messages are unchanged.
-
 - **The matrix IV fit throws an `ArgumentError` when X̂'X̂ is singular.** It
   used a pseudo-inverse for the variance without a warning. Numerical fallbacks
   (the F statistic's `NaN`, the LIML eigenvalue regularization) apply only to
   `PosDefException`, `SingularException` and `LAPACKException`; any other error
   propagates.
 
-### Fixed
+### New Features
+
+- **`lags()` formula term**: `@formula(y ~ lags(x, 12))` expands into a matrix of 12 lag columns. Supports nested transforms (`lags(log(abs(x)), 3)`), interactions (`lags(x, 3) & z`), and composition with other terms. Moved from LocalProjections.jl so both packages share the same implementation.
+
+- **`first_stage_F_iid(m)`**, **`first_stage_F_robust(m)`**, **`first_stage_F_KP(m)`**: New first-stage diagnostic API returning `FirstStageFTest{T, K}` — parametric on value type (`Float64` or `Vector{Float64}`) and variance estimator type. Replaces the ambiguous `first_stage(m)` / `first_stage_f(m)` functions.
+
+- **Kleibergen-Paap rk Wald F-statistic exposed**: The joint KP test statistic is now stored on the model and accessible via `first_stage_F_KP(m)`. Previously computed but discarded.
+
+- **`AbstractTest` type hierarchy**: `AbstractTest` is the new abstract supertype for `FirstStageFTest{T, K}`, `WeakIVTestResult{T}`, `FirstStageResult`, `FirstStageIV`, `WuHausmanResult` and `SarganResult`. Those with a single well-defined p-value implement `StatsAPI.pvalue`; `SarganResult` also implements `dof`. `WeakIVTestResult` implements neither, since it reports against critical values.
+
+- **Public model surface**: `OLSEstimator`, `IVEstimator`, `OLSMatrixEstimator`, `IVMatrixEstimator`, `AbstractIVEstimator`, `esample` and `partial_out` are marked `public`, so `Regress.OLSEstimator` and friends resolve without being exported.
+
+- **`Homoskedastic` type**: Sentinel type used as the variance estimator parameter for IID F-tests.
+
+- **NaN row filtering for `lags()`**: Rows with NaN values produced by `lags()` in the design matrix are automatically excluded from estimation in OLS, TSLS, and K-class models. The `esample` field correctly reflects these exclusions.
+
+- **EWC, DriscollKraay, VARHAC support**: All `Correlated` variance estimators from CovarianceMatrices.jl now work with `model + vcov(...)` (previously only `HAC` was supported).
+
+- **Driscoll-Kraay standard errors on fitted models**: `model + vcov(DriscollKraay(...))`
+  now works for OLS and IV models and for the matrix estimators. Previously
+  every such call was a `MethodError`. The computation delegates to
+  CovarianceMatrices, which scales by the number of time periods rather than
+  the number of observations.
+
+- **`show` reports the selected HAC bandwidth**: a model fitted with an
+  automatic bandwidth selector prints `Bartlett(auto: 55.71)` rather than
+  `Bartlett(auto)`. The bandwidth is a property of the estimate, so it is read
+  from `vcov(model)`.
+
+- **`probit(df, formula)`**: binary-response probit by iteratively reweighted
+  least squares, absorbing high-dimensional fixed effects declared with
+  `fe(...)` terms. Returns a `BinaryEstimator` supporting `coef`, `deviance`,
+  `nulldeviance`, `loglikelihood`, `fitted`, `residuals`, `dof`, and `r2` as
+  McFadden's pseudo-R². Coefficients agree with GLM's `ProbitLink` to IRLS
+  convergence tolerance.
+
+  The estimator reports point estimates only: it computes no standard errors,
+  so `stderror`, `vcov` and `coeftable` are not available for it.
+
+### Bug Fixes
 
 - The first-stage statistics no longer turn every exception into `NaN`. Only a
   failed factorization (`PosDefException`, `SingularException`,
-  `LAPACKException`) gives `NaN`; other errors propagate. `m + vcov(CachedCR(...))`
-  on an over-identified IV model set the robust first-stage F to `NaN` this way;
-  it is now computed.
+  `LAPACKException`) gives `NaN`; other errors propagate.
 
 - `first_stage_F_robust` under `CR0` and `CR1` counts the absorbed fixed effects
   in the cluster K, as `vcov` and the Kleibergen-Paap statistic do, and equals
@@ -144,9 +216,9 @@
 - `adjr2` on formula-fitted OLS models counts the intercept once. It counted
   it twice, so `Sales ~ NDI + Price` on the Cigar data gave 0.207082 where R
   `lm` gives 0.207657. The `:McFadden` variant had the same error. `adjr2` now
-  equals R `lm`, fixest `ar2`/`apr2` and AER `ivreg` on OLS and IV models,
-  formula and matrix, with and without an intercept. It also works on IV models
-  fitted from matrices, which threw a `MethodError`.
+  equals R `lm` and fixest `ar2`/`apr2` on OLS models and AER `ivreg` on IV
+  models, formula and matrix, with and without an intercept. It also works on
+  IV models fitted from matrices, which threw a `MethodError`.
 
 - The model F-statistic of a formula-fitted IV model no longer includes the
   intercept in the Wald test when the intercept is implicit, as in
@@ -176,18 +248,15 @@
   It was accepted on formula OLS models.
 
 - `CR2` and `CR3` on OLS models give the leverage-adjusted cluster variance
-  `Σ_g X_g'(I - H_gg)^p u_g u_g'(I - H_gg)^p X_g` for any row order, with
-  weights, and with several cluster dimensions. They were wrong when the rows
-  of a cluster were not contiguous (which includes every two-way clustering)
-  and, for weighted models, because the unweighted residuals were combined
-  with the weighted design. `CovarianceMatrices.momentresiduals` and
+  `Σ_g X_g'(I - H_gg)^p u_g u_g'(I - H_gg)^p X_g` for any row order and with
+  several cluster dimensions. They were wrong when the rows of a cluster were
+  not contiguous, which includes every two-way clustering.
+  `CovarianceMatrices.momentresiduals` and
   `CovarianceMatrices.momentmatrix` return the weighted residuals and moments
   of a weighted OLS model.
 - `CR2` and `CR3` on IV models throw an `ArgumentError` when `I - H_gg` is
   singular for a cluster, and no longer return `NaN` for an observation with a
   zero residual.
-- `vcov(DriscollKraay(...), model)` threw a `MethodError` (an ambiguity with
-  CovarianceMatrices) on OLS and IV models.
 - On weighted IV models, every variance computed after the fit was wrong:
   `vcov(estimator, model)`, `model + vcov(estimator)`, and `stderror` with an
   estimator, for all estimators (HC, CR, HAC, `Uncorrelated`, Driscoll-Kraay)
@@ -197,94 +266,6 @@
   by `Pop`, HC1 came out about 1/4900 of the correct value. The variance
   computed at fit time was correct. Weighted IV variances now equal fixest's
   `feols(...; weights)` for HC1 and iid.
-
-### New Features
-
-- **`probit(df, formula)`**: binary-response probit by iteratively reweighted
-  least squares, absorbing high-dimensional fixed effects declared with
-  `fe(...)` terms. Returns a `BinaryEstimator` supporting `coef`, `deviance`,
-  `nulldeviance`, `loglikelihood`, `fitted`, `residuals`, `dof`, and `r2` as
-  McFadden's pseudo-R². Coefficients agree with GLM's `ProbitLink` to IRLS
-  convergence tolerance.
-
-  The estimator reports point estimates only: it computes no standard errors,
-  so `stderror`, `vcov` and `coeftable` are not available for it.
-
-## 0.2.0
-
-### Breaking Changes
-
-- **Requires CovarianceMatrices 0.32.** Earlier versions no longer load: 0.32
-  removed `setkernelweights!`, on which Regress defined methods.
-
-- **Requires Julia 1.12.** CovarianceMatrices 0.32 sets this floor, which rules
-  out the 1.10 long-term-support release.
-
-- **`vcov(model)` returns a `CovarianceMatrix`** instead of
-  `Symmetric{T,Matrix{T}}`. It is still an `AbstractMatrix`, so indexing,
-  `inv`, `\`, and factorizations are unchanged, but the result now carries the
-  metadata of the estimate: `estimator(V)` gives the variance estimator,
-  `bandwidth(V)` the selected HAC bandwidth, `kernelweights(V)` the per-column
-  kernel weights, `information(V)` the full metadata `NamedTuple`, and
-  `parent(V)` the bare matrix. Code that stores the result in a
-  `Matrix`- or `Symmetric`-typed field needs updating; code that only reads
-  values does not.
-
-- **`weakivtest` takes `tol` instead of `eps`.** The old name shadowed
-  `Base.eps` in the method body. `weakivtest(m; eps = ...)` now errors.
-
-- **`IVMatrixEstimator` carries the estimator it was fitted with.** The type is
-  now `IVMatrixEstimator{T, E, V, C}`, with a leading `estimator::E` field, so
-  that leverage and display can dispatch on it. Code that writes the type with
-  all its parameters, or constructs one positionally, needs updating;
-  `M <: IVMatrixEstimator` bounds and field access by name are unaffected.
-
-- **`LagTerm` is public rather than exported.** It names the type behind
-  `lags(...)` and is not meant to be constructed directly, so `using Regress`
-  no longer brings it into scope. Use `Regress.LagTerm` where you need the
-  name; `lags` itself is unchanged.
-
-- **Invalid input raises `ArgumentError`.** Validation failures previously
-  threw bare strings, which `throw` wraps in `ErrorException`. Messages are
-  unchanged, but `catch`/`@test_throws` clauses matching on the exception type
-  need updating.
-
-- **The matrix API rejects offset arrays.** `ols(X, y)` and
-  `iv(::TSLS, Z, X, y)` index positionally after converting their arguments,
-  so they now declare `Base.require_one_based_indexing`. `view`s and ordinary
-  arrays are unaffected; an `OffsetArray` argument errors at the entry point
-  instead of producing a misaligned fit.
-
-### New Features
-
-- **`lags()` formula term**: `@formula(y ~ lags(x, 12))` expands into a matrix of 12 lag columns. Supports nested transforms (`lags(log(abs(x)), 3)`), interactions (`lags(x, 3) & z`), and composition with other terms. Moved from LocalProjections.jl so both packages share the same implementation.
-
-- **`first_stage_F_iid(m)`**, **`first_stage_F_robust(m)`**, **`first_stage_F_KP(m)`**: New first-stage diagnostic API returning `FirstStageFTest{T, K}` — parametric on value type (`Float64` or `Vector{Float64}`) and variance estimator type. Replaces the ambiguous `first_stage(m)` / `first_stage_f(m)` functions.
-
-- **Kleibergen-Paap rk Wald F-statistic exposed**: The joint KP test statistic is now stored on the model and accessible via `first_stage_F_KP(m)`. Previously computed but discarded.
-
-- **`AbstractTest` type hierarchy**: `AbstractTest` is the new abstract supertype for `FirstStageFTest{T, K}`, `WeakIVTestResult{T}`, `FirstStageResult`, `FirstStageIV`, `WuHausmanResult` and `SarganResult`. Those with a single well-defined p-value implement `StatsAPI.pvalue`; `SarganResult` also implements `dof`. `WeakIVTestResult` implements neither, since it reports against critical values.
-
-- **Public model surface**: `OLSEstimator`, `IVEstimator`, `OLSMatrixEstimator`, `IVMatrixEstimator`, `AbstractIVEstimator`, `esample` and `partial_out` are marked `public`, so `Regress.OLSEstimator` and friends resolve without being exported.
-
-- **`Homoskedastic` type**: Sentinel type used as the variance estimator parameter for IID F-tests.
-
-- **NaN row filtering for `lags()`**: Rows with NaN values produced by `lags()` in the design matrix are automatically excluded from estimation in OLS, TSLS, and K-class models. The `esample` field correctly reflects these exclusions.
-
-- **EWC, DriscollKraay, VARHAC support**: All `Correlated` variance estimators from CovarianceMatrices.jl now work with `model + vcov(...)` (previously only `HAC` was supported).
-
-- **Driscoll-Kraay standard errors on fitted models**: `model + vcov(DriscollKraay(...))`
-  now works for OLS and IV models and for the matrix estimators. Previously
-  every such call was a `MethodError`. The computation delegates to
-  CovarianceMatrices, which scales by the number of time periods rather than
-  the number of observations.
-
-- **`show` reports the selected HAC bandwidth**: a model fitted with an
-  automatic bandwidth selector prints `Bartlett(auto: 55.71)` rather than
-  `Bartlett(auto)`. The bandwidth is a property of the estimate, so it is read
-  from `vcov(model)`.
-
-### Bug Fixes
 
 - **The intercept moment entered automatic HAC bandwidth selection on IV
   models.** With `Bartlett{NeweyWest}` or `Bartlett{Andrews}`, the OLS path
@@ -310,15 +291,15 @@
   cluster meat sums. CR2 standard errors change by a fraction of a percent on
   typical data. CR3 is unaffected.
 
-- **CR2/CR3 on weighted models no longer double-count the weights.**
-  `modelmatrix` and `residuals` already carry the weighting, so the per-cluster
-  leverage blocks must not be weighted again. They were, which drove
-  `I - H_gg` indefinite and produced standard errors roughly an order of
-  magnitude too large (and, for CR2, an `InexactError` on some data).
-
-- **CR2/CR3 work on IV models.** Both threw `MethodError` when resolving cluster
-  indices. The leverage blocks are built from the second-stage regressor matrix,
-  which is what the IV sandwich treats as the design.
+- **CR2/CR3 work on IV models**, with one or several cluster dimensions. Both
+  threw `MethodError` when resolving cluster indices. The leverage blocks are
+  built from the second-stage regressor matrix, which is what the IV sandwich
+  treats as the design. Multiway clustering uses the inclusion–exclusion sum
+  over cluster intersections, each term with its own leverage adjustment, as on
+  OLS models. Every term uses the second-stage leverage; R `vcovCL` uses
+  `hatvalues(ivreg)` for a term whose clusters are single rows, so two-way IV
+  results differ from it slightly (relative difference at most 3e-5 on the Cigar data
+  clustered by `State` and `Year`).
 
 - **HC4/HC5 on the matrix IV estimator use the standard exponents.**
   `IVMatrixEstimator` raised `1 - h` to `δ` where the definition uses `δ/2`, and
@@ -353,8 +334,6 @@
 
 - **`lags()` coefficient names for nested transforms**: `lags(log(abs(x)), 3)` produced names like `l_lag1` instead of `log(abs(x))_lag1`.
 
-- **`_compute_meat` cluster aggregation**: The Kleibergen-Paap rank test's cluster-robust meat computation treated a `Clustering` struct as a raw vector. Fixed to use `.groups` / `.ngroups`.
-
 - **Fixest validation F-stat references**: Test reference values for `F_nonrobust` were Kleibergen-Paap statistics, not IID F-statistics. Corrected to match the actual SSR-based F-test.
 
 - **`first_stage with vcov` test**: HC1 and HC3 first-stage robust F-statistics were identical due to the HC3 fallthrough bug.
@@ -364,9 +343,9 @@
 ### Refactoring
 
 - **Residual adjustments delegate to CovarianceMatrices.jl**: the HC0 and HC2-HC5
-  adjustments, and the CR2/CR3 leverage blocks, now come from
-  `CovarianceMatrices.residual_adjustment` instead of being reimplemented for each
-  of the four model types. HC1 stays local because upstream divides by
+  adjustments now come from `CovarianceMatrices.residual_adjustment` instead of
+  being reimplemented for each of the four model types. The CR2/CR3 leverage
+  adjustments are computed in Regress. HC1 stays local because upstream divides by
   `n - length(coef(m))`, which cannot see fixed effects absorbed out of the
   design, and the CR finite-sample corrections stay local to keep matching fixest.
 
