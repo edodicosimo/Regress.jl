@@ -1050,8 +1050,11 @@ on all four model types. `n` is the number of observations, `G` the number of cl
 
 `HC1` and `CR1` equal R fixest's defaults, and `CR0` equals fixest with
 `ssc(cluster.adj = FALSE)`. `CR2`, `CR3` and the HAC kernels equal R sandwich
-(`vcovCL`, `NeweyWest(adjust = TRUE)`), including weighted and multiway `CR2` and
-`CR3`. `Kc` counts the parameters as
+(`vcovCL`, `NeweyWest(adjust = TRUE)`), including weighted `CR2` and `CR3`, and
+multiway `CR2` and `CR3` on OLS models. On IV models, multiway `CR2` and `CR3` use the
+leverage of the projected regressors in every term, while `vcovCL` uses
+`hatvalues(ivreg)` for a term whose clusters are single rows, so the two can differ
+slightly. `Kc` counts the parameters as
 fixest does: the coefficients, plus, for each absorbed fixed effect, its number of
 levels, or 1 if it is nested in a cluster dimension, minus one for each fixed effect
 after the first. With several cluster dimensions, R `vcovCL` applies `G_d/(G_d-1)` to

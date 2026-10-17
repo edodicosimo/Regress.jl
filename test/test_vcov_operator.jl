@@ -401,12 +401,18 @@ end
     m = @formula Sales ~ Price + NDI
     model = Regress.ols(df, m)
     model_iv = Regress.iv(Regress.TSLS(), df, @formula(Sales ~ Price + (NDI ~ CPI)))
+    y = Float64.(df.Sales)
+    X = hcat(ones(nrow(df)), Float64.(df.Price), Float64.(df.NDI))
+    Z = hcat(ones(nrow(df)), Float64.(df.Price), Float64.(df.CPI))
+    model_m = Regress.ols(X, y)
+    model_iv_m = Regress.iv(Regress.TSLS(), Z, X, y)
 
     # A fitted model's vcov reports the estimator that produced it.
-    for fitted in (model, model_iv)
+    for fitted in (model, model_iv, model_m, model_iv_m)
         V = vcov(fitted)
         @test V isa CovarianceMatrix
         @test estimator(V) isa Regress.HR1
+        @test Matrix(V) ≈ vcov(Regress.HC1(), fitted)
         # HC estimators select nothing, so there is no bandwidth to report.
         @test bandwidth(V) === nothing
         @test kernelweights(V) === nothing

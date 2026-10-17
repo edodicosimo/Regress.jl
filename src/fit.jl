@@ -537,7 +537,7 @@ function iv(estimator::TSLS, Z::AbstractMatrix{<:Real}, X::AbstractMatrix{<:Real
     # Form the sandwich as B*B' (B = (X̂'X̂)⁻¹ X̂'diag(e)) so it is PSD even when X̂'X̂ is nearly
     # singular (weak first stage): A*M*A can then have negative diagonal entries from cancellation.
     B_hc1 = invXhatXhat * Xe'
-    vcov_matrix = Symmetric(scale_hc1 .* (B_hc1 * B_hc1'))
+    vcov_matrix = _wrap_vcov(Symmetric(scale_hc1 .* (B_hc1 * B_hc1')), default_vcov, nothing)
 
     # Standard errors, t-stats, p-values
     se = sqrt.(diag(vcov_matrix))
