@@ -295,7 +295,7 @@ function fit_kclass_estimator(
         dof_fes_local = sum(nunique(fe) for fe in subfes; init = 0)
 
         fstats = _iv_first_stage_fstats_standard(
-            Xendo, newZ, Pi, XexoXexo, XexoZ, ZZ, X,
+            Xendo, newZ, Pi, XexoXexo, XexoZ, ZZ,
             nobs_eff, dof_fes_local, endo_names_final,
             k_exo_final, data_prep.has_intercept)
 
@@ -447,7 +447,7 @@ function fit_kclass_estimator(
     # Compute HC1 vcov: invA * (Adj .* u)' * (Adj .* u) * invA * scale
     n = nobs_eff
     k = size(X, 2)
-    scale = n / dof_residual
+    scale = T(n / dof_residual)
 
     M = Adj_reordered .* residuals_raw
     meat = M' * M
@@ -463,9 +463,9 @@ function fit_kclass_estimator(
     p_values = 2 .* tdistccdf.(dof_residual, abs.(t_stats))
 
     # Compute robust F-statistic (Wald test)
-    has_int = hasintercept(data_prep.formula_origin)
     F_stat_robust,
-    p_val_robust = compute_robust_fstat(coef_full, vcov_matrix, has_int, dof_residual)
+    p_val_robust = compute_robust_fstat(
+        coef_full, vcov_matrix, data_prep.has_intercept, dof_residual)
 
     # Default vcov estimator (HC1)
     default_vcov = CovarianceMatrices.HC1()

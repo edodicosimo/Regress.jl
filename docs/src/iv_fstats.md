@@ -98,12 +98,12 @@ $$\hat{\pi} = Z_s'\tilde{x}/n, \qquad \hat{d} = Z_s'\tilde{y}/n$$
 4. Reduced-form residuals:
 $$\hat{u}_x = \tilde{x} - Z_s\hat{\pi}, \qquad \hat{u}_y = \tilde{y} - Z_s\hat{d}$$
 
-5. Residual covariance ($\delta = n - \ell - p$):
+5. Residual covariance, with $\delta = n - \ell - p - d_{\text{FE}}$ the residual degrees of freedom of the first-stage regression ($d_{\text{FE}}$ the absorbed fixed-effect levels):
 $$\Omega = \begin{pmatrix}\hat{u}_y'\hat{u}_y & \hat{u}_y'\hat{u}_x \\ \hat{u}_x'\hat{u}_y & \hat{u}_x'\hat{u}_x\end{pmatrix} / \delta$$
 
-6. Sandwich variance of stacked moments $M = [\hat{u}_y \odot Z_s,\;\hat{u}_x \odot Z_s]$ (size $n \times 2\ell$):
-$$W = \frac{\text{meat}(M,\;\texttt{vcov\_type})}{\delta \cdot c_{\text{clust}}}$$
-   where $c_{\text{clust}}$ is 1 for HC, or cluster DOF adjustment for CR. Extract:
+6. Variance of the stacked moments $M = [\hat{u}_y \odot Z_s,\;\hat{u}_x \odot Z_s]$ (size $n \times 2\ell$) under the model's variance estimator:
+$$W = c \cdot \text{meat}(M)/n$$
+   where $\text{meat}(M)$ is $n$ times `aVar` of $M$ (HC0 for HC1, CR0 on the same clusters for CR1) and $c$ is the finite-sample factor `vcov` applies to the first-stage regression: $n/\delta$ for HC1 and the HAC kernels, $G/(G-1)\cdot(n-1)/(n-K)$ for CR1, $(n-1)/(n-K)$ for CR0 and 1 for HC0, with $K$ the first-stage parameters counted as `vcov` counts them. For HC1 and CR1 this is the W of Stata's `weakivtest`. Under `Uncorrelated`, $W = \Omega \otimes I_\ell$, so all three F-statistics coincide. The test supports `Uncorrelated`, HC0, HC1, CR0, CR1 (any number of cluster dimensions) and the HAC kernels, and throws an `ArgumentError` for any other estimator. Extract:
 $$W_2 = W[\ell\!+\!1:2\ell,\;\ell\!+\!1:2\ell]$$
 
 7. Three F-statistics:

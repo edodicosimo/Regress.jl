@@ -241,7 +241,7 @@ Compute first-stage F-statistics for standard IV.
 function _iv_first_stage_fstats_standard(
         Xendo::Matrix{T}, newZ::Matrix{T}, Pi::Matrix{T},
         XexoXexo::Symmetric{T}, XexoZ::Matrix{T}, ZZ::Symmetric{T},
-        X::Matrix{T}, nobs::Int, dof_fes::Int,
+        nobs::Int, dof_fes::Int,
         endo_names::Vector{String}, k_exo::Int, has_intercept::Bool
 ) where {T}
     n = size(Xendo, 1)
@@ -269,19 +269,19 @@ function _iv_first_stage_fstats_standard(
     k_endo = size(Xendo, 2)
 
     # Compute joint first-stage F-statistic (Kleibergen-Paap)
+    # HR1's factor n / dof_residual of the first-stage regression
     F_kp,
     p_kp = compute_first_stage_fstat(
         Xendo_res, Z_res, Pip,
         CovarianceMatrices.HR1(),
-        nobs, size(X, 2), dof_fes
+        nobs / max(1, nobs - size(newZ, 2) - dof_fes)
     )
 
     # Compute per-endogenous F-statistics
     F_kp_per_endo,
     p_kp_per_endo = compute_per_endogenous_fstats(
         Xendo_res, Z_res, Pip,
-        CovarianceMatrices.HR1(),
-        nobs, size(X, 2), dof_fes;
+        CovarianceMatrices.HR1(), dof_fes;
         Xendo_orig = Xendo, newZ = newZ
     )
 
@@ -358,7 +358,7 @@ end
 
 """
     _iv_compute_inference(Xhat, residuals_raw, invXhatXhat, basis_coef, coef,
-                          nobs, dof_model, dof_fes, dof_residual, formula_origin, T)
+                          nobs, dof_model, dof_fes, dof_residual, has_intercept, T)
 
 Compute vcov matrix, standard errors, t-stats, p-values, and robust F-stat.
 """
@@ -366,7 +366,7 @@ function _iv_compute_inference(
         Xhat::Matrix{T}, residuals_raw::Vector{T},
         invXhatXhat::Symmetric{T}, basis_coef::BitVector, coef::Vector{T},
         nobs::Int, dof_model::Int, dof_fes::Int, dof_residual::Int,
-        formula_origin
+        has_intercept::Bool
 ) where {T}
     # Compute HC1 vcov
     vcov_matrix = compute_hc1_vcov_direct_iv(
@@ -384,9 +384,8 @@ function _iv_compute_inference(
     p_values = 2 .* tdistccdf.(dof_residual, abs.(t_stats))
 
     # Robust F-statistic
-    has_int = hasintercept(formula_origin)
     F_stat_robust,
-    p_val_robust = compute_robust_fstat(coef_full, vcov_matrix, has_int, dof_residual)
+    p_val_robust = compute_robust_fstat(coef_full, vcov_matrix, has_intercept, dof_residual)
 
     return (vcov_matrix = vcov_matrix, se = se, t_stats = t_stats,
         p_values = p_values, F_stat_robust = F_stat_robust,
@@ -628,7 +627,7 @@ function fit_tsls(@nospecialize(df),
                 endo_names_final, data_prep.has_intercept)
         else
             fstats = _iv_first_stage_fstats_standard(
-                Xendo, newZ, Pi, XexoXexo, XexoZ, ZZ, X,
+                Xendo, newZ, Pi, XexoXexo, XexoZ, ZZ,
                 nobs_eff, dof_fes_local, endo_names_final,
                 k_exo_final, data_prep.has_intercept)
         end
@@ -740,7 +739,7 @@ function fit_tsls(@nospecialize(df),
 
     inf = _iv_compute_inference(
         convert(Matrix{T}, Xhat), residuals_raw, invXhatXhat, basis_coef, coef,
-        nobs_eff, dof_model, dof_fes, dof_residual, data_prep.formula_origin)
+        nobs_eff, dof_model, dof_fes, dof_residual, data_prep.has_intercept)
 
     ##########################################################################
     ## Return IVEstimator

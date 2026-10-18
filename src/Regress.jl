@@ -1,7 +1,7 @@
 module Regress
 
 using CovarianceMatrices: CovarianceMatrices, AbstractAsymptoticVarianceEstimator,
-                          CovarianceMatrix, aVar, bread, momentmatrix, stderror,
+                          CovarianceMatrix, aVar, bread, stderror,
                           vcov,
                           HC0, HC1, HC2, HC3, HC4, HC5,
                           CR0, CR1, CR2, CR3,
@@ -13,8 +13,9 @@ using DataFrames: DataFrames, AsTable, DataFrame, Not, combine, completecases,
 using FixedEffects: FixedEffects, AbstractFixedEffectSolver, FixedEffect,
                     solve_coefficients!, solve_residuals!
 using LinearAlgebra: LinearAlgebra, BLAS, Cholesky, ColumnNorm, Hermitian, I,
+                     LAPACKException, PosDefException, SingularException,
                      Symmetric, UpperTriangular, cholesky, cholesky!, diag,
-                     diagm, dot, eigvals, issuccess, mul!, pinv, qr,
+                     diagm, dot, eigen, eigvals, issuccess, mul!, qr,
                      rank, rmul!, svd, tr
 using PrecompileTools: PrecompileTools, @compile_workload
 using Printf: Printf, @printf, @sprintf

@@ -63,7 +63,7 @@ end
 #actually return minus the symmetric
 function invsym!(X::Symmetric; has_intercept = false, setzeros = false, diagonal = 1:size(X, 2))
     tols = max.(diag(X), 1)
-    buffer = zeros(size(X, 1))
+    buffer = zeros(eltype(X), size(X, 1))
     for j in diagonal
         d = X[j, j]
         if setzeros && abs(d) < tols[j] * sqrt(eps())
@@ -227,7 +227,7 @@ function ls_solve!(Xy::Symmetric, nx)
         invsym!(Xy, diagonal = 1:nx)
         return Xy[1:nx, (nx + 1):end]
     else
-        return zeros(Float64, 0, size(Xy, 2) - nx)
+        return zeros(eltype(Xy), 0, size(Xy, 2) - nx)
     end
 end
 
