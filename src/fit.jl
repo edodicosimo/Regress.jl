@@ -615,44 +615,36 @@ end
 # The sandwich variance is `bread * X̂'diag(e²)X̂ * bread`, with `X̂` the projected
 # regressors for TSLS and the k-class adjustment matrix `X - κ·resid(X | Z)` otherwise.
 function _matrix_iv_fit(::TSLS, Z_mat, X_mat, y_vec, n_endogenous)
-    # Compute projection matrix P_Z = Z(Z'Z)^{-1}Z'
-    ZZ = Z_mat' * Z_mat
-    ZZ_chol = try
-        cholesky(Symmetric(ZZ))
-    catch e
-        e isa PosDefException || rethrow()
-        throw(ArgumentError("Instrument matrix Z is rank deficient or nearly singular"))
-    end
-    # Projected regressors: X̂ = P_Z * X = Z * (Z'Z)^{-1} * Z' * X
-    ZX = Z_mat' * X_mat
-    X_hat = Z_mat * (ZZ_chol \ ZX)
+    # Projected regressors X̂ = P_Z X, from an orthonormal basis of the columns of Z
+    FZ = _full_rank_qr(Z_mat, "Instrument matrix Z is rank deficient or nearly singular")
+    QZ = Matrix(FZ.Q)
+    X_hat = QZ * (QZ' * X_mat)
 
-    # TSLS estimator: β = (X̂'X)^{-1} X̂'y = (X'P_Z X)^{-1} X'P_Z y
-    # Using X̂'X = X'P_Z X and X̂'y = X'P_Z y
-    XhatX = X_hat' * X_mat
-    Xhaty = X_hat' * y_vec
-
-    XhatX_chol = try
-        cholesky(Symmetric(XhatX))
-    catch e
-        e isa PosDefException || rethrow()
-        throw(ArgumentError("X̂'X is singular - check for perfect collinearity"))
-    end
-
-    beta = XhatX_chol \ Xhaty
-
-    # For vcov, we need (X̂'X̂)^{-1}, not (X̂'X)^{-1}
-    XhatXhat = X_hat' * X_hat
-    XhatXhat_chol = try
-        cholesky(Symmetric(XhatXhat))
-    catch e
-        e isa PosDefException || rethrow()
-        throw(ArgumentError("X̂'X̂ is singular - check for perfect collinearity"))
-    end
-    invXhatXhat = Symmetric(XhatXhat_chol \ I)
+    # TSLS estimator: β = (X̂'X)⁻¹X̂'y = (X̂'X̂)⁻¹X̂'y, since X̂'X = X'P_Z X = X̂'X̂.
+    # With X̂[:, p] = QR, β[p] = R⁻¹Q'y and (X̂'X̂)⁻¹[p, p] = R⁻¹R⁻ᵀ.
+    FX = _full_rank_qr(X_hat, "X̂'X is singular - check for perfect collinearity")
+    Rinv = inv(UpperTriangular(FX.R))
+    p = FX.p
+    beta = similar(y_vec, size(X_mat, 2))
+    beta[p] = Rinv * (Matrix(FX.Q)' * y_vec)
+    invXhatXhat = similar(Rinv, size(Rinv))
+    invXhatXhat[p, p] = Rinv * Rinv'
 
     residuals = y_vec - X_mat * beta
-    return beta, residuals, X_hat, invXhatXhat
+    return beta, residuals, X_hat, Symmetric(invXhatXhat)
+end
+
+# Pivoted QR of `A`; throws `ArgumentError(msg)` when `A` has numerical rank below its
+# column count, that is, when a diagonal entry of R is at most `tol` times the largest,
+# the rule `detect_collinearity_qr` applies. A tolerance, rather than a failed Cholesky
+# factorization of `A'A`, decides singularity: an exactly collinear `A` can leave a
+# small positive pivot after rounding, depending on the BLAS kernel.
+function _full_rank_qr(A, msg; tol = 1e-8)
+    F = qr(A, ColumnNorm())
+    R_diag = abs.(diag(F.R))
+    threshold = isempty(R_diag) ? zero(eltype(R_diag)) : maximum(R_diag) * tol
+    count(>(threshold), R_diag) == size(A, 2) || throw(ArgumentError(msg))
+    return F
 end
 
 function _matrix_iv_fit(estimator::Union{LIML, Fuller, KClass}, Z_mat, X_mat, y_vec,

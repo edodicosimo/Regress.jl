@@ -212,6 +212,11 @@
 
 ### Bug Fixes
 
+- The matrix `iv(TSLS(), Z, X, y)` throws an `ArgumentError` for a rank-deficient
+  `Z` or `X̂ = P_Z X` on every platform. Rank is decided by pivoted QR with the
+  `1e-8` tolerance of the OLS collinearity check; the fit could otherwise return
+  coefficients for an exactly collinear `X` on x86_64.
+
 - `CR0` and `CR1` with a single cluster vector whose length differs from the
   number of observations throw a `DimensionMismatch` naming both lengths. On
   OLS models (`ols(X, y) + vcov(CR1(g))` and the formula equivalent) they read

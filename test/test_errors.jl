@@ -29,4 +29,6 @@
     Z = hcat(ones(n), df.Pimin, df.Pop)
     @test_throws ArgumentError Regress.iv(Regress.TSLS(), Z, Xdup, df.Sales)
     @test_throws "X̂'X is singular" Regress.iv(Regress.TSLS(), Z, Xdup, df.Sales)
+    Xnear = hcat(ones(n), df.NDI, df.NDI .* (1 .+ 1e-12 .* sin.(1:n)))
+    @test_throws "X̂'X is singular" Regress.iv(Regress.TSLS(), Z, Xnear, df.Sales)
 end
