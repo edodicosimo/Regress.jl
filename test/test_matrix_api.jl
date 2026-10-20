@@ -99,3 +99,34 @@ end
     @test_throws "not stored" fitted(m)
     @test_throws "not stored" modelmatrix(m)
 end
+
+@testitem "matrix models - cluster vector length must match the rows" tags = [
+    :ols, :iv, :matrix, :vcov] begin
+    using Regress, StatsBase
+    using CovarianceMatrices
+
+    n = 200
+    t = range(0, 1; length = n)
+    z = cos.(5π .* t)
+    x = 0.8 .* z .+ 0.1 .* sin.(3π .* t)
+    X = hcat(ones(n), x)
+    y = X * [0.5, 1.0] .+ 0.1 .* sin.(11π .* t)
+    Z = hcat(ones(n), z)
+    mols = Regress.ols(X, y)
+    miv = Regress.iv(TSLS(), Z, X, y; has_intercept = true, n_endogenous = 1)
+
+    for m in (mols, miv), len in (n - 1, n + 1), E in (CR0, CR1, CR2, CR3)
+        k = E(repeat(1:10; outer = cld(len, 10))[1:len])
+        msg = Regex("cluster variables? ha(s|ve) $len observations.* $n")
+        @test_throws msg vcov(k, m)
+        @test_throws msg stderror(k, m)
+        @test_throws msg m + vcov(k)
+    end
+    # The single-cluster CR0/CR1 path of matrix OLS aggregates without a moment matrix.
+    @test_throws DimensionMismatch aVar(CR1(rand(1:10, n - 1)), mols)
+    # Several cluster dimensions
+    g1, g2 = repeat(1:10; outer = 20), repeat(1:20; inner = 10)
+    for m in (mols, miv)
+        @test_throws DimensionMismatch vcov(CR1(g1[1:(n - 1)], g2[1:(n - 1)]), m)
+    end
+end

@@ -50,7 +50,8 @@ This avoids allocating an n×k moment matrix, only allocating G×k.
 - `X::Matrix{T}`: Model matrix (n × k)
 - `y::Vector{T}`: Response vector (weighted)
 - `mu::Vector{T}`: Fitted values (weighted)
-- `groups::Vector{Int}`: Cluster assignments (length n)
+- `groups::Vector{Int}`: Cluster assignments (length n; any other length throws a
+  `DimensionMismatch`)
 
 # Returns
 - `X2`: The filled cluster aggregation matrix
@@ -58,15 +59,17 @@ This avoids allocating an n×k moment matrix, only allocating G×k.
 function cluster_aggregate_direct!(X2::Matrix{T}, X::Matrix{T},
         y::AbstractVector{T}, mu::AbstractVector{T},
         groups::Vector{Int}) where {T <: AbstractFloat}
-    n, k = size(X)
-    ngroups = size(X2, 1)
+    Base.require_one_based_indexing(X2, X, y, mu, groups)
+    n = size(X, 1)
+    length(groups) == n || throw(DimensionMismatch(
+        "the cluster variable has $(length(groups)) observations but the model has $n"))
 
     # Zero the output buffer
     fill!(X2, zero(T))
 
     # Aggregate: X2[g, j] = sum over i in cluster g of X[i,j] * (y[i] - mu[i])
-    @inbounds for j in 1:k
-        @simd for i in 1:n
+    for j in axes(X, 2)
+        for i in eachindex(groups, y, mu)
             g = groups[i]
             r = y[i] - mu[i]
             X2[g, j] += X[i, j] * r

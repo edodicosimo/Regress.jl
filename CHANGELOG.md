@@ -173,6 +173,11 @@
 
 ### Bug Fixes
 
+- `CR0` and `CR1` with a single cluster vector whose length differs from the
+  number of observations throw a `DimensionMismatch` naming both lengths. On
+  OLS models (`ols(X, y) + vcov(CR1(g))` and the formula equivalent) they read
+  out of bounds and could crash the Julia process.
+
 - The first-stage statistics no longer turn every exception into `NaN`. Only a
   failed factorization (`PosDefException`, `SingularException`,
   `LAPACKException`) gives `NaN`; other errors propagate.
