@@ -183,6 +183,14 @@
   and `has_intercept = true` with `fe` is an `ArgumentError`. Both matrix types gain
   `fe_groups` and `fe_ngroups` fields after `coefnames`.
 
+- **K-class estimators on matrix fits**: matrix `iv` accepts `LIML()`, `Fuller(a)`
+  and `KClass(kappa)` as well as `TSLS()`, with the same keywords (`n_endogenous`,
+  `fe`, `has_intercept`, `coefnames`). Coefficients, HC, CR and HAC standard errors,
+  `first_stage` and `weakivtest` match the formula fits. The
+  k-class fits require `Z = [Xexo, Zinstr]` and `X = [Xexo, Xendo]` with the same
+  leading columns and throw an `ArgumentError` otherwise. The matrix `iv` method is
+  now `iv(::AbstractIVEstimator, Z, X, y)`.
+
 - **`probit(df, formula)`**: binary-response probit by iteratively reweighted
   least squares, absorbing high-dimensional fixed effects declared with
   `fe(...)` terms. Returns a `BinaryEstimator` supporting `coef`, `deviance`,

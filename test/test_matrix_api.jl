@@ -260,3 +260,56 @@ end
     @test_throws "did not converge" Regress.ols(
         [x w], y; fe = (id, pair .+ t), fe_maxiter = 1, fe_tol = 1e-30)
 end
+
+@testitem "matrix models - k-class IV" tags = [:iv, :kclass, :matrix, :fe] begin
+    using Regress, DataFrames, StableRNGs
+    using Regress: fe
+
+    rng = StableRNG(1)
+    G, T = 40, 15
+    n = G * T
+    id = repeat(1:G, inner = T)
+    t = repeat(1:T, outer = G)
+    z1, z2, w, u = randn(rng, n), randn(rng, n), randn(rng, n), randn(rng, n)
+    x = 0.5 .* z1 .+ 0.3 .* z2 .+ 0.5 .* u .+ 0.2 .* w
+    y = 1 .+ 2 .* x .- 0.5 .* w .+ u .+ randn(rng, G)[id]
+    df = DataFrame(; y, x, w, z1, z2, id, t)
+
+    # Fuller(1) on this design has kappa just below 1, and KClass(0.8) is below 1; both warn
+    for est in (LIML(), Fuller(1.0), KClass(0.8))
+        fit(f) = est isa LIML ? (@test_logs f()) : (@test_logs (:warn, r"kappa < 1") f())
+        mf = fit(() -> Regress.iv(est, df, @formula(y ~ w + (x ~ z1 + z2));
+            save_cluster = [:id]))
+        mm = fit(() -> Regress.iv(est, [ones(n) w z1 z2], [ones(n) w x], y;
+            coefnames = ["(Intercept)", "w", "x"]))
+        @test mm.estimator == est
+        @test coef(mm) ≈ coef(mf)
+        @test stderror(mm) ≈ stderror(mf)
+        @test r2(mm) ≈ r2(mf)
+        @test stderror(mm + vcov(CR1(id))) ≈ stderror(mf + vcov(CR1(:id)))
+        @test stderror(mm + vcov(HC3())) ≈ stderror(mf + vcov(HC3()))
+        @test stderror(mm + vcov(Bartlett(3))) ≈ stderror(mf + vcov(Bartlett(3)))
+        @test first_stage(mm).F_robust ≈ first_stage(mf).F_robust
+        @test weakivtest(mm).F_eff ≈ weakivtest(mf).F_eff
+
+        # Absorbed fixed effects
+        opts = (; tol = 1e-12, drop_singletons = false, save_cluster = [:t])
+        mfe = fit(() -> Regress.iv(est, df, @formula(y ~ w + (x ~ z1 + z2) + fe(id));
+            opts...))
+        mme = fit(() -> Regress.iv(est, [w z1 z2], [w x], y; fe = id))
+        @test coef(mme) ≈ coef(mfe)
+        @test stderror(mme) ≈ stderror(mfe)
+        @test dof_residual(mme) == dof_residual(mfe)
+        @test stderror(mme + vcov(CR1(t))) ≈ stderror(mfe + vcov(CR1(:t)))
+    end
+
+    # Just identified: LIML is TSLS
+    liml = Regress.iv(LIML(), [ones(n) w z1], [ones(n) w x], y)
+    tsls = Regress.iv(TSLS(), [ones(n) w z1], [ones(n) w x], y)
+    @test coef(liml) ≈ coef(tsls)
+    @test stderror(liml) ≈ stderror(tsls)
+
+    # The k-class fits need the exogenous columns first in both Z and X
+    @test_throws "LIML needs Z = [Xexo, Zinstr] and X = [Xexo, Xendo] with the same first 2" Regress.iv(
+        LIML(), [w ones(n) z1], [ones(n) w x], y)
+end

@@ -409,14 +409,18 @@ end
 ##############################################################################
 
 """
-    iv(::TSLS, Z::AbstractMatrix, X::AbstractMatrix, y::AbstractVector;
+    iv(estimator, Z::AbstractMatrix, X::AbstractMatrix, y::AbstractVector;
        n_endogenous::Int=1, fe=nothing, has_intercept::Bool=fe === nothing,
        coefnames=nothing) -> IVMatrixEstimator
 
-Estimate an IV model using Two-Stage Least Squares with matrix inputs.
+Estimate an IV model with matrix inputs, by Two-Stage Least Squares (`TSLS()`) or a
+k-class estimator (`LIML()`, `Fuller(a)`, `KClass(kappa)`).
 
 # Arguments
-- `Z::AbstractMatrix`: Instrument matrix, typically [Xexo, Zinstr] where Zinstr are excluded instruments
+- `estimator`: `TSLS()`, `LIML()`, `Fuller(a)` or `KClass(kappa)`
+- `Z::AbstractMatrix`: Instrument matrix [Xexo, Zinstr] where Zinstr are excluded
+  instruments. The k-class estimators require its first columns to equal those of `X`
+  and throw an `ArgumentError` otherwise; TSLS projects on all of `Z`.
 - `X::AbstractMatrix`: Regressor matrix, typically [Xexo, Xendo] where Xendo are endogenous variables
 - `y::AbstractVector`: Response vector
 
@@ -441,6 +445,17 @@ The TSLS estimator is computed as:
 \\hat{\\beta}_{TSLS} = (X'P_Z X)^{-1} X'P_Z y
 ```
 where ``P_Z = Z(Z'Z)^{-1}Z'`` is the projection matrix onto the instrument space.
+
+A k-class estimator solves
+```math
+\\hat{\\beta}_\\kappa = (X'X - \\kappa X'M_Z X)^{-1} (X'y - \\kappa X'M_Z y)
+```
+with ``M_Z = I - P_Z``; ``\\kappa`` is the LIML eigenvalue for `LIML()`, that eigenvalue
+minus ``a/(n - L - p)`` for `Fuller(a)` (``L`` excluded instruments, ``p`` exogenous
+regressors), and `kappa` for `KClass(kappa)`, as in the formula fits. The sandwich
+variance replaces ``\\hat X`` by ``X - \\kappa M_Z X`` and ``(\\hat X'\\hat X)^{-1}`` by
+``(X'X - \\kappa X'M_Z X)^{-1}``. `first_stage` and `weakivtest` depend only on the data
+and the variance estimator, not on the second-stage estimator.
 
 # Example
 ```julia
@@ -468,7 +483,8 @@ model_robust = model + vcov(HC1())
 
 See also: [`iv(::TSLS, df, formula)`](@ref), [`IVMatrixEstimator`](@ref)
 """
-function iv(estimator::TSLS, Z::AbstractMatrix{<:Real}, X::AbstractMatrix{<:Real},
+function iv(estimator::AbstractIVEstimator, Z::AbstractMatrix{<:Real},
+        X::AbstractMatrix{<:Real},
         y::AbstractVector{<:Real};
         n_endogenous::Int = 1,
         fe = nothing,
@@ -502,6 +518,7 @@ function iv(estimator::TSLS, Z::AbstractMatrix{<:Real}, X::AbstractMatrix{<:Real
     k_instr = k_z - k_exo  # Excluded instruments
     k_instr >= n_endogenous || throw(ArgumentError(
         "Not enough instruments: $k_instr excluded instruments < $n_endogenous endogenous variables"))
+    _check_matrix_iv_layout(estimator, Z, X, k_exo)
 
     # Determine numeric type
     T = promote_type(eltype(X), eltype(Z), eltype(y))
@@ -520,44 +537,8 @@ function iv(estimator::TSLS, Z::AbstractMatrix{<:Real}, X::AbstractMatrix{<:Real
         _absorb_matrix_fes!(cols, colnames, fes, uweights(n), fe_tol, fe_maxiter, T)
     end
 
-    # Compute projection matrix P_Z = Z(Z'Z)^{-1}Z'
-    ZZ = Z_mat' * Z_mat
-    ZZ_chol = try
-        cholesky(Symmetric(ZZ))
-    catch e
-        e isa PosDefException || rethrow()
-        throw(ArgumentError("Instrument matrix Z is rank deficient or nearly singular"))
-    end
-    # Projected regressors: X̂ = P_Z * X = Z * (Z'Z)^{-1} * Z' * X
-    ZX = Z_mat' * X_mat
-    X_hat = Z_mat * (ZZ_chol \ ZX)
-
-    # TSLS estimator: β = (X̂'X)^{-1} X̂'y = (X'P_Z X)^{-1} X'P_Z y
-    # Using X̂'X = X'P_Z X and X̂'y = X'P_Z y
-    XhatX = X_hat' * X_mat
-    Xhaty = X_hat' * y_vec
-
-    XhatX_chol = try
-        cholesky(Symmetric(XhatX))
-    catch e
-        e isa PosDefException || rethrow()
-        throw(ArgumentError("X̂'X is singular - check for perfect collinearity"))
-    end
-
-    beta = XhatX_chol \ Xhaty
-
-    # For vcov, we need (X̂'X̂)^{-1}, not (X̂'X)^{-1}
-    XhatXhat = X_hat' * X_hat
-    XhatXhat_chol = try
-        cholesky(Symmetric(XhatXhat))
-    catch e
-        e isa PosDefException || rethrow()
-        throw(ArgumentError("X̂'X̂ is singular - check for perfect collinearity"))
-    end
-    invXhatXhat = Symmetric(XhatXhat_chol \ I)
-
-    # Residuals
-    residuals = y_vec - X_mat * beta
+    beta, residuals, X_hat, invXhatXhat = _matrix_iv_fit(
+        estimator, Z_mat, X_mat, y_vec, n_endogenous)
 
     # Degrees of freedom
     k = size(X_mat, 2)
@@ -617,6 +598,76 @@ function iv(estimator::TSLS, Z::AbstractMatrix{<:Real}, X::AbstractMatrix{<:Real
         t_stats,
         p_values
     )
+end
+
+# The k-class fit separates the exogenous regressors from the excluded instruments, so
+# it needs Z = [Xexo, Zinstr] with the same leading columns as X. TSLS projects on all
+# of Z and does not.
+_check_matrix_iv_layout(::TSLS, Z, X, k_exo) = nothing
+function _check_matrix_iv_layout(estimator::AbstractIVEstimator, Z, X, k_exo)
+    view(Z, :, 1:k_exo) == view(X, :, 1:k_exo) || throw(ArgumentError(
+        "$(_estimator_name(estimator)) needs Z = [Xexo, Zinstr] and X = [Xexo, Xendo] " *
+        "with the same first $k_exo (exogenous) columns"))
+    return nothing
+end
+
+# The coefficients, residuals, second-stage regressors and bread of a matrix IV fit.
+# The sandwich variance is `bread * X̂'diag(e²)X̂ * bread`, with `X̂` the projected
+# regressors for TSLS and the k-class adjustment matrix `X - κ·resid(X | Z)` otherwise.
+function _matrix_iv_fit(::TSLS, Z_mat, X_mat, y_vec, n_endogenous)
+    # Compute projection matrix P_Z = Z(Z'Z)^{-1}Z'
+    ZZ = Z_mat' * Z_mat
+    ZZ_chol = try
+        cholesky(Symmetric(ZZ))
+    catch e
+        e isa PosDefException || rethrow()
+        throw(ArgumentError("Instrument matrix Z is rank deficient or nearly singular"))
+    end
+    # Projected regressors: X̂ = P_Z * X = Z * (Z'Z)^{-1} * Z' * X
+    ZX = Z_mat' * X_mat
+    X_hat = Z_mat * (ZZ_chol \ ZX)
+
+    # TSLS estimator: β = (X̂'X)^{-1} X̂'y = (X'P_Z X)^{-1} X'P_Z y
+    # Using X̂'X = X'P_Z X and X̂'y = X'P_Z y
+    XhatX = X_hat' * X_mat
+    Xhaty = X_hat' * y_vec
+
+    XhatX_chol = try
+        cholesky(Symmetric(XhatX))
+    catch e
+        e isa PosDefException || rethrow()
+        throw(ArgumentError("X̂'X is singular - check for perfect collinearity"))
+    end
+
+    beta = XhatX_chol \ Xhaty
+
+    # For vcov, we need (X̂'X̂)^{-1}, not (X̂'X)^{-1}
+    XhatXhat = X_hat' * X_hat
+    XhatXhat_chol = try
+        cholesky(Symmetric(XhatXhat))
+    catch e
+        e isa PosDefException || rethrow()
+        throw(ArgumentError("X̂'X̂ is singular - check for perfect collinearity"))
+    end
+    invXhatXhat = Symmetric(XhatXhat_chol \ I)
+
+    residuals = y_vec - X_mat * beta
+    return beta, residuals, X_hat, invXhatXhat
+end
+
+function _matrix_iv_fit(estimator::Union{LIML, Fuller, KClass}, Z_mat, X_mat, y_vec,
+        n_endogenous)
+    k_exo = size(X_mat, 2) - n_endogenous
+    Xexo = X_mat[:, 1:k_exo]
+    Xendo = X_mat[:, (k_exo + 1):end]
+    Zinstr = Z_mat[:, (k_exo + 1):end]
+
+    kappa = _kclass_kappa(estimator, y_vec, Xendo, Zinstr, Xexo)
+    coef, residuals, invA, Adj = _kclass_fit(y_vec, Xendo, Zinstr, Xexo, kappa)
+
+    # `_kclass_fit` orders the coefficients [endogenous; exogenous]; X is [Xexo, Xendo].
+    order = vcat((n_endogenous + 1):(n_endogenous + k_exo), 1:n_endogenous)
+    return coef[order], residuals, Adj[:, order], Symmetric(invA[order, order])
 end
 
 """

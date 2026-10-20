@@ -7,6 +7,37 @@
 ##############################################################################
 
 """
+    _kclass_kappa(est, y, Xendo, Z, Xexo) -> T
+
+The k-class parameter of the estimator `est`: the LIML eigenvalue for `LIML()`, the LIML
+eigenvalue minus `a / (n - L - p)` for `Fuller(a)` (`n` rows, `L` excluded instruments
+in `Z`, `p` exogenous regressors in `Xexo`), and `kappa` for `KClass(kappa)`. Warns when
+the result is below 1.
+"""
+function _kclass_kappa(est::AbstractIVEstimator, y::AbstractVector{T},
+        Xendo::AbstractVecOrMat{T}, Z::AbstractMatrix{T},
+        Xexo::AbstractMatrix{T}) where {T}
+    kappa = if est isa LIML
+        _liml_kappa(y, Xendo, Z, Xexo)
+    elseif est isa Fuller
+        adj_denom = length(y) - size(Z, 2) - size(Xexo, 2)
+        if adj_denom <= 0
+            throw(ArgumentError("Fuller adjustment undefined: n - L - p = $adj_denom <= 0"))
+        end
+        _liml_kappa(y, Xendo, Z, Xexo) - T(est.a) / adj_denom
+    elseif est isa KClass
+        T(est.kappa)
+    else
+        throw(ArgumentError("Unknown K-class estimator: $(typeof(est))"))
+    end
+
+    if kappa < one(T)
+        @warn "K-class kappa < 1 ($kappa), model may be poorly identified"
+    end
+    return kappa
+end
+
+"""
     fit_kclass_estimator(estimator, df, formula; kwargs...) -> IVEstimator{T}
 
 Internal function to fit K-class IV estimators (LIML, Fuller, KClass).
@@ -208,29 +239,7 @@ function fit_kclass_estimator(
     k_z_final = size(Z, 2)
     k_endo_final = size(Xendo, 2)
 
-    kappa = if estimator isa LIML
-        _liml_kappa(y, Xendo, Z, Xexo)
-    elseif estimator isa Fuller
-        kappa_liml = _liml_kappa(y, Xendo, Z, Xexo)
-        # Fuller adjustment: kappa = kappa_liml - a/(n - L - p)
-        n = nobs_eff
-        L = k_z_final  # Number of excluded instruments
-        p = k_exo_final  # Number of exogenous variables
-        adj_denom = n - L - p
-        if adj_denom <= 0
-            throw(ArgumentError("Fuller adjustment undefined: n - L - p = $adj_denom <= 0"))
-        end
-        kappa_liml - T(estimator.a) / adj_denom
-    elseif estimator isa KClass
-        T(estimator.kappa)
-    else
-        throw(ArgumentError("Unknown K-class estimator: $(typeof(estimator))"))
-    end
-
-    # Warn if kappa < 1 (poor identification)
-    if kappa < one(T)
-        @warn "K-class kappa < 1 ($kappa), model may be poorly identified"
-    end
+    kappa = _kclass_kappa(estimator, y, Xendo, Z, Xexo)
 
     ##############################################################################
     ## K-Class Coefficient Estimation
