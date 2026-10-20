@@ -133,6 +133,7 @@ Use `ols(X, y)` to fit this model type.
 - `tss::T`: Total sum of squares
 - `r2::T`: R-squared
 - `has_intercept::Bool`: Whether model has intercept (assumed from first column)
+- `coefnames::Vector{String}`: Coefficient names, one per column of `X`
 - `vcov_estimator::V`: Variance-covariance estimator used to compute `vcov_matrix`
 - `vcov_matrix::C`: Precomputed variance-covariance matrix
 - `se::Vector{T}`: Standard errors
@@ -168,6 +169,7 @@ struct OLSMatrixEstimator{T <: AbstractFloat, P <: OLSLinearPredictor{T}, V,
     tss::T                          # Total sum of squares
     r2::T                           # R-squared
     has_intercept::Bool             # Whether model has intercept
+    coefnames::Vector{String}       # One name per column of X
 
     # Variance-covariance estimator and precomputed statistics
     vcov_estimator::V                        # Estimator used to compute vcov_matrix
@@ -181,6 +183,14 @@ has_iv(::OLSMatrixEstimator) = false
 has_fe(::OLSMatrixEstimator) = false
 dof_fes(::OLSMatrixEstimator) = 0
 model_hasintercept(m::OLSMatrixEstimator) = m.has_intercept
+
+# Names of a matrix fit's coefficients: the `coefnames` keyword, or `x1, ..., xk`.
+function _matrix_coefnames(names, k::Integer)
+    names === nothing && return ["x$i" for i in 1:k]
+    length(names) == k || throw(DimensionMismatch(
+        "coefnames has $(length(names)) names but the design matrix has $k columns"))
+    return String[string(n) for n in names]
+end
 
 """
     has_matrices(m::OLSMatrixEstimator) -> Bool
@@ -201,6 +211,7 @@ function StatsAPI.coef(m::OLSMatrixEstimator)
     beta[.!m.basis_coef] .= zero(eltype(beta))
     return beta
 end
+StatsAPI.coefnames(m::OLSMatrixEstimator) = m.coefnames
 
 function StatsAPI.response(m::OLSMatrixEstimator)
     has_response_data(m.rr) ||
@@ -276,7 +287,7 @@ function Base.:+(m::OLSMatrixEstimator{T, P, V1}, v::VcovSpec{V2}) where {T, P, 
     return OLSMatrixEstimator{T, P, V2, typeof(vcov_mat)}(
         m.rr, m.pp, m.basis_coef,
         m.nobs, m.dof, m.dof_residual,
-        m.rss, m.tss, m.r2, m.has_intercept,
+        m.rss, m.tss, m.r2, m.has_intercept, m.coefnames,
         v.source, vcov_mat, se, t_stats, p_values
     )
 end

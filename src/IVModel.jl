@@ -1467,6 +1467,7 @@ Designed for programmatic use (e.g., LocalProjections.jl).
 - `tss::T`: Total sum of squares
 - `r2::T`: R-squared
 - `has_intercept::Bool`: Whether model includes intercept
+- `coefnames::Vector{String}`: Coefficient names, one per column of `X`
 - `vcov_estimator::V`: Variance estimator used
 - `vcov_matrix::C`: Precomputed variance-covariance matrix
 - `se::Vector{T}`: Standard errors
@@ -1495,6 +1496,7 @@ struct IVMatrixEstimator{T <: AbstractFloat, E <: AbstractIVEstimator, V,
     tss::T
     r2::T
     has_intercept::Bool
+    coefnames::Vector{String}
 
     # Variance-covariance
     vcov_estimator::V
@@ -1520,6 +1522,7 @@ function StatsAPI.coef(m::IVMatrixEstimator)
     beta[.!m.basis_coef] .= zero(eltype(beta))
     return beta
 end
+StatsAPI.coefnames(m::IVMatrixEstimator) = m.coefnames
 
 StatsAPI.nobs(m::IVMatrixEstimator) = m.nobs
 StatsAPI.dof(m::IVMatrixEstimator) = m.dof
@@ -1716,6 +1719,7 @@ function Base.:+(m::IVMatrixEstimator{T, E, V1}, v::VcovSpec{V2}) where {T, E, V
         m.tss,
         m.r2,
         m.has_intercept,
+        m.coefnames,
         v.source,
         new_vcov,
         new_se,
@@ -1738,8 +1742,12 @@ Returns a `FirstStageIV` containing:
 - Non-robust F-statistic per endogenous variable
 - Robust F-statistic per endogenous variable using the model's current `vcov`
 
+The first-stage models are named `[exogenous..., instruments...]`, with the exogenous
+names taken from `coefnames(m)`.
+
 # Keyword Arguments
-- `endogenous_names`: Names for endogenous variables (default: `["endo_1", ...]`)
+- `endogenous_names`: Names for endogenous variables (default: the last `n_endogenous`
+  entries of `coefnames(m)`)
 - `instrument_names`: Names for excluded instruments (default: `["inst_1", ...]`)
 
 # Example
@@ -1772,12 +1780,18 @@ function first_stage(m::IVMatrixEstimator{T};
 
     # Default names
     endo_names = endogenous_names === nothing ?
-                 ["endo_$i" for i in 1:n_endo] : endogenous_names
+                 coefnames(m)[(k_exo + 1):end] : endogenous_names
     instr_names = instrument_names === nothing ?
                   ["inst_$i" for i in 1:K] : instrument_names
+    length(endo_names) == n_endo || throw(DimensionMismatch(
+        "endogenous_names has $(length(endo_names)) names but the model has $n_endo endogenous variables"))
+    length(instr_names) == K || throw(DimensionMismatch(
+        "instrument_names has $(length(instr_names)) names but the model has $K excluded instruments"))
+    fs_names = vcat(coefnames(m)[1:k_exo], instr_names)
 
     # Step 1: Run first-stage OLS regressions (xendo_j on full Z)
-    fs_models = [ols(Z, Xendo[:, i]; has_intercept = m.has_intercept) for i in 1:n_endo]
+    fs_models = [ols(Z, Xendo[:, i]; has_intercept = m.has_intercept, coefnames = fs_names)
+                 for i in 1:n_endo]
 
     # Step 2: Compute residualized data for F-statistics
     # Partial out exogenous regressors from excluded instruments and endogenous
@@ -1856,7 +1870,7 @@ function Base.show(io::IO, ::MIME"text/plain", m::IVMatrixEstimator{T}) where {T
     println(io, "Coefficients:")
     cc = coef(m)
     se = m.se
-    for i in 1:length(cc)
-        println(io, "  β[$i] = $(round(cc[i], digits=6)) (SE: $(round(se[i], digits=6)))")
+    for (name, c, s) in zip(coefnames(m), cc, se)
+        println(io, "  $name = $(round(c, digits=6)) (SE: $(round(s, digits=6)))")
     end
 end

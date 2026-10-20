@@ -161,6 +161,17 @@
   `Bartlett(auto)`. The bandwidth is a property of the estimate, so it is read
   from `vcov(model)`.
 
+- **Coefficient names on matrix fits**: matrix `ols(X, y)` and `iv(TSLS(), Z, X, y)`
+  take a `coefnames` keyword with one name per column of `X` (default
+  `["x1", ..., "xk"]`), so `coefnames` and `coeftable` work on
+  `OLSMatrixEstimator` and `IVMatrixEstimator`, and `show` of an
+  `IVMatrixEstimator` labels coefficients by name. A name vector of the wrong
+  length is a `DimensionMismatch`. `first_stage(m)` names its first-stage models
+  `[exogenous..., instruments...]` and, by default, names the endogenous
+  variables from `coefnames(m)` rather than `endo_1, ...`. Both matrix types
+  gain a `coefnames` field after `has_intercept`, so code that constructs them
+  positionally needs updating.
+
 - **`probit(df, formula)`**: binary-response probit by iteratively reweighted
   least squares, absorbing high-dimensional fixed effects declared with
   `fe(...)` terms. Returns a `BinaryEstimator` supporting `coef`, `deviance`,

@@ -113,7 +113,7 @@ end
     y = X * [0.5, 1.0] .+ 0.1 .* sin.(11π .* t)
     Z = hcat(ones(n), z)
     mols = Regress.ols(X, y)
-    miv = Regress.iv(TSLS(), Z, X, y; has_intercept = true, n_endogenous = 1)
+    miv = Regress.iv(Regress.TSLS(), Z, X, y; has_intercept = true, n_endogenous = 1)
 
     for m in (mols, miv), len in (n - 1, n + 1), E in (CR0, CR1, CR2, CR3)
         k = E(repeat(1:10; outer = cld(len, 10))[1:len])
@@ -129,4 +129,59 @@ end
     for m in (mols, miv)
         @test_throws DimensionMismatch vcov(CR1(g1[1:(n - 1)], g2[1:(n - 1)]), m)
     end
+end
+
+@testitem "matrix models - coefficient names" tags = [:ols, :iv, :matrix] begin
+    using Regress, StatsBase
+    using CovarianceMatrices
+    using Regress: first_stage
+
+    n = 200
+    t = range(0, 1; length = n)
+    w = cos.(2π .* t)
+    z = sin.(2π .* t)
+    v = 0.3 .* cos.(5π .* t)
+    x = 0.8 .* z .+ v
+    y = 1.0 .+ 2.0 .* x .+ 0.5 .* w .+ 0.4 .* v .+ 0.05 .* sin.(9π .* t)
+
+    # OLS: default names, given names, names survive `+ vcov`
+    X = hcat(ones(n), w, x)
+    m0 = Regress.ols(X, y)
+    @test coefnames(m0) == ["x1", "x2", "x3"]
+    m = Regress.ols(X, y; coefnames = ["(Intercept)", "w", "x"])
+    @test coefnames(m) == ["(Intercept)", "w", "x"]
+    @test coef(m) == coef(m0)
+    @test stderror(m) == stderror(m0)
+    @test coefnames(m + vcov(HC3())) == coefnames(m)
+    @test Regress.ols(X, y; coefnames = [:a, :b, :c]) |> coefnames == ["a", "b", "c"]
+    ct = coeftable(m)
+    @test ct.rownms == ["w", "x", "(Intercept)"]   # intercept is listed last
+    @test occursin("w", sprint(show, ct))
+    @test_throws "coefnames has 2 names but the design matrix has 3 columns" Regress.ols(
+        X, y; coefnames = ["a", "b"])
+
+    # IV: names on the model, `+ vcov`, coeftable, show and the first stage
+    Z = hcat(ones(n), w, z)
+    i0 = Regress.iv(Regress.TSLS(), Z, X, y)
+    @test coefnames(i0) == ["x1", "x2", "x3"]
+    mi = Regress.iv(Regress.TSLS(), Z, X, y; coefnames = ["(Intercept)", "w", "x"])
+    @test coefnames(mi) == ["(Intercept)", "w", "x"]
+    @test coef(mi) == coef(i0)
+    @test coefnames(mi + vcov(HC3())) == coefnames(mi)
+    @test coeftable(mi).rownms == ["w", "x", "(Intercept)"]
+    @test occursin("x = ", sprint(show, MIME"text/plain"(), mi))
+    @test_throws DimensionMismatch Regress.iv(Regress.TSLS(), Z, X, y; coefnames = ["a"])
+
+    fs = first_stage(mi)
+    @test fs.endogenous_names == ["x"]
+    @test coefnames(fs.models[1]) == ["(Intercept)", "w", "inst_1"]
+    fs_z = first_stage(mi; instrument_names = ["z"])
+    @test coefnames(fs_z.models[1]) == ["(Intercept)", "w", "z"]
+    @test coef(fs_z.models[1]) == coef(fs.models[1])
+    @test fs_z.F_nonrobust == fs.F_nonrobust
+    @test first_stage(i0).endogenous_names == ["x3"]
+    @test_throws "instrument_names has 2 names but the model has 1 excluded instruments" first_stage(
+        mi; instrument_names = ["z", "q"])
+    @test_throws "endogenous_names has 2 names but the model has 1 endogenous variables" first_stage(
+        mi; endogenous_names = ["x", "q"])
 end

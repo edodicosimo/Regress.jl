@@ -114,6 +114,8 @@ design matrices. Compatible with CovarianceMatrices.jl for robust inference.
 - `tol::Real = 1e-8`: Tolerance for collinearity detection
 - `weights::Union{Nothing, AbstractVector} = nothing`: Observation weights
 - `has_intercept::Bool = true`: Whether model includes an intercept (for R² computation)
+- `coefnames = nothing`: One name per column of `X`, returned by `coefnames(model)` and
+  shown by `coeftable(model)`; the default is `["x1", ..., "xk"]`
 
 # Returns
 - `OLSMatrixEstimator{T, P, V, C}`: Fitted model with precomputed HC1 standard errors
@@ -169,7 +171,8 @@ function ols(X::AbstractMatrix{<:Real}, y::AbstractVector{<:Real};
         collinearity::Symbol = :qr,
         tol::Real = 1e-8,
         weights::Union{Nothing, AbstractVector} = nothing,
-        has_intercept::Bool = true)
+        has_intercept::Bool = true,
+        coefnames::Union{Nothing, AbstractVector} = nothing)
 
     # Fit is 1-based: X and y are materialized into `Matrix`/`Vector` and indexed
     # positionally. Reject offset axes up front with a clear message rather than
@@ -180,6 +183,7 @@ function ols(X::AbstractMatrix{<:Real}, y::AbstractVector{<:Real};
     n, k = size(X)
     length(y) == n ||
         throw(DimensionMismatch("X has $n rows but y has $(length(y)) elements"))
+    names = _matrix_coefnames(coefnames, k)
 
     # Validate keywords
     factorization in (:auto, :chol, :qr) ||
@@ -264,7 +268,7 @@ function ols(X::AbstractMatrix{<:Real}, y::AbstractVector{<:Real};
     return OLSMatrixEstimator{T, typeof(pp), typeof(default_vcov), typeof(vcov_matrix)}(
         rr, pp, basis_coef,
         n, dof_model, dof_res,
-        T(rss), T(tss), T(r2_val), has_intercept,
+        T(rss), T(tss), T(r2_val), has_intercept, names,
         default_vcov, vcov_matrix, se, t_stats, p_values
     )
 end
@@ -383,7 +387,7 @@ end
 
 """
     iv(::TSLS, Z::AbstractMatrix, X::AbstractMatrix, y::AbstractVector;
-       has_intercept::Bool=true, n_endogenous::Int=1) -> IVMatrixEstimator
+       has_intercept::Bool=true, n_endogenous::Int=1, coefnames=nothing) -> IVMatrixEstimator
 
 Estimate an IV model using Two-Stage Least Squares with matrix inputs.
 
@@ -395,6 +399,9 @@ Estimate an IV model using Two-Stage Least Squares with matrix inputs.
 # Keyword Arguments
 - `has_intercept::Bool=true`: Whether the model includes an intercept (affects DOF calculation)
 - `n_endogenous::Int=1`: Number of endogenous variables (last n_endogenous columns of X)
+- `coefnames=nothing`: One name per column of `X`, returned by `coefnames(model)` and
+  shown by `coeftable(model)`; the default is `["x1", ..., "xk"]`. `first_stage(model)`
+  names the endogenous variables and the exogenous regressors from it.
 
 # Returns
 - `IVMatrixEstimator{T}`: Fitted IV model supporting `coef()`, `vcov()`, `model + vcov()`, etc.
@@ -436,7 +443,8 @@ See also: [`iv(::TSLS, df, formula)`](@ref), [`IVMatrixEstimator`](@ref)
 function iv(estimator::TSLS, Z::AbstractMatrix{<:Real}, X::AbstractMatrix{<:Real},
         y::AbstractVector{<:Real};
         has_intercept::Bool = true,
-        n_endogenous::Int = 1)
+        n_endogenous::Int = 1,
+        coefnames::Union{Nothing, AbstractVector} = nothing)
 
     # Fit is 1-based: Z, X, y are materialized into `Matrix`/`Vector` and indexed
     # positionally. Reject offset axes up front with a clear message rather than
@@ -452,6 +460,7 @@ function iv(estimator::TSLS, Z::AbstractMatrix{<:Real}, X::AbstractMatrix{<:Real
     n_endogenous >= 0 || throw(ArgumentError("n_endogenous must be non-negative"))
     n_endogenous <= size(X, 2) ||
         throw(ArgumentError("n_endogenous ($n_endogenous) > number of X columns ($(size(X,2)))"))
+    names = _matrix_coefnames(coefnames, size(X, 2))
 
     # Check order condition
     k_x = size(X, 2)
@@ -557,6 +566,7 @@ function iv(estimator::TSLS, Z::AbstractMatrix{<:Real}, X::AbstractMatrix{<:Real
         T(tss),
         T(r2_val),
         has_intercept,
+        names,
         default_vcov,
         vcov_matrix,
         se,
