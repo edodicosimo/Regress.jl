@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0
+## 0.3.0
 
 ### Breaking Changes
 
@@ -8,8 +8,7 @@
   functions for packages that form their own moment matrices, which earlier
   versions lack.
 
-- **Requires Julia 1.12.** CovarianceMatrices 0.33 sets this floor, which rules
-  out the 1.10 long-term-support release.
+- **Requires Julia 1.13**, which rules out the 1.10 long-term-support release.
 
 - **`vcov(model)` returns a `CovarianceMatrix`** instead of
   `Symmetric{T,Matrix{T}}`. It is still an `AbstractMatrix`, so indexing,
@@ -171,6 +170,18 @@
   variables from `coefnames(m)` rather than `endo_1, ...`. Both matrix types
   gain a `coefnames` field after `has_intercept`, so code that constructs them
   positionally needs updating.
+
+- **Absorbed fixed effects on matrix fits**: matrix `ols(X, y)` and
+  `iv(TSLS(), Z, X, y)` take an `fe` keyword, one grouping vector or a tuple of
+  them, and demean `y`, `X` and `Z` on the groups with the solver behind
+  `fe(...)` terms (`fe_tol`, `fe_maxiter`; non-convergence throws). The absorbed
+  levels enter `dof_residual`, the HC1 and HAC scaling, and the CR0/CR1
+  small-sample K, where a fixed effect nested in the cluster counts once, as in
+  the formula path. `first_stage` and `weakivtest` count them too. Coefficients
+  and standard errors match `ols(df, @formula(... + fe(g)); drop_singletons =
+  false)`; rows are never dropped. `has_intercept` defaults to `fe === nothing`,
+  and `has_intercept = true` with `fe` is an `ArgumentError`. Both matrix types gain
+  `fe_groups` and `fe_ngroups` fields after `coefnames`.
 
 - **`probit(df, formula)`**: binary-response probit by iteratively reweighted
   least squares, absorbing high-dimensional fixed effects declared with
