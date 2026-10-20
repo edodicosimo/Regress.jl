@@ -4,8 +4,9 @@
 
 ### Breaking Changes
 
-- **Requires CovarianceMatrices 0.33.** Regress uses its public extension
-  functions for packages that form their own moment matrices, which earlier
+- **Requires CovarianceMatrices 0.33.1.** Regress uses its public extension
+  functions for packages that form their own moment matrices, and its
+  `DriscollKraay` estimators that name their indices by column, which earlier
   versions lack.
 
 - **Requires Julia 1.13**, which rules out the 1.10 long-term-support release.
@@ -190,6 +191,14 @@
   k-class fits require `Z = [Xexo, Zinstr]` and `X = [Xexo, Xendo]` with the same
   leading columns and throw an `ArgumentError` otherwise. The matrix `iv` method is
   now `iv(::AbstractIVEstimator, Z, X, y)`.
+
+- **Driscoll-Kraay indices named by column**: on OLS and IV formula fits,
+  `DriscollKraay(K; tis = :year, iis = :firm)` looks up the time and unit columns
+  stored with `save_cluster = [:year, :firm]`, as `CR1(:firm)` does for clusters, in
+  `vcov`, `stderror`, `aVar` and `model + vcov(...)`. The result equals the estimator
+  built from the stored vectors. A missing column throws the cluster-not-found
+  `ArgumentError`; a model fitted from matrices throws an `ArgumentError` asking for
+  the index vectors.
 
 - **`probit(df, formula)`**: binary-response probit by iteratively reweighted
   least squares, absorbing high-dimensional fixed effects declared with

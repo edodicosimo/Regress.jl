@@ -698,7 +698,7 @@ end
 
 # The stored cluster vectors for the column names of `k`; see `_resolve_clusters`.
 function _cluster_vectors(k, m::IVEstimator)
-    return map(_CM.clusters(k)) do name
+    return map(_cluster_names(k)) do name
         haskey(m.postestimation.cluster_vars, name) || _cluster_not_found_error(name, m)
         m.postestimation.cluster_vars[name]
     end

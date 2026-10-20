@@ -495,6 +495,50 @@ end
     @test !isapprox(Matrix(vcov(k, model)), Matrix(vcov(Bartlett(4), model)); rtol = 0.1)
 end
 
+@testitem "Driscoll-Kraay named by column on formula models" tags = [:vcov, :hac, :panel] begin
+    using Regress, CSV, DataFrames, LinearAlgebra, StatsBase
+    using CovarianceMatrices: CovarianceMatrices, DriscollKraay, CovarianceMatrix, aVar
+
+    df = DataFrame(CSV.File(joinpath(dirname(pathof(Regress)), "../dataset/Cigar.csv")))
+    allowmissing!(df, :Price)
+    df.Price[1:7] .= missing   # a sample smaller than the table
+    n = nrow(df)
+
+    named(; correction = :HC0) = DriscollKraay(
+        Bartlett(4); tis = :Year, iis = :State, correction)
+    given(rows; correction = :HC0) = DriscollKraay(
+        Bartlett(4); tis = df.Year[rows], iis = df.State[rows], correction)
+
+    model = Regress.ols(df, @formula(Sales ~ Price + NDI); save_cluster = [:Year, :State])
+    model_iv = Regress.iv(TSLS(), df, @formula(Sales ~ NDI + (Price ~ Pimin));
+        save_cluster = [:Year, :State])
+
+    for m in (model, model_iv), correction in (:HC0, :HC1, :sss)
+
+        k, kv = named(; correction), given(m.esample; correction)
+        @test Matrix(vcov(k, m)) ≈ Matrix(vcov(kv, m))
+        @test stderror(k, m) ≈ stderror(kv, m)
+        @test aVar(k, m) ≈ aVar(kv, m)
+        mk = m + vcov(k)
+        @test stderror(mk) ≈ stderror(kv, m)
+        @test Matrix(vcov(mk)) ≈ Matrix(vcov(m + vcov(kv)))
+    end
+    fs_named = first_stage(model_iv + vcov(named()))
+    fs_given = first_stage(model_iv + vcov(given(model_iv.esample)))
+    @test fs_named.F_robust ≈ fs_given.F_robust
+
+    # Columns not saved with the model are named in the error.
+    unsaved = Regress.ols(df, @formula(Sales ~ Price + NDI); save_cluster = :State)
+    @test_throws "Cluster variable :Year not found" vcov(named(), unsaved)
+    @test_throws "Cluster variable :Year not found" vcov(
+        named(), Regress.iv(TSLS(), df, @formula(Sales ~ NDI + (Price ~ Pimin))))
+
+    # A model fitted from matrices holds no columns to look up.
+    model_mat = Regress.ols([ones(n) df.NDI], df.Sales)
+    @test_throws "names its time and unit indices by column, but a model fitted from matrices" vcov(
+        named(), model_mat)
+end
+
 @testitem "residual adjustment delegates to CovarianceMatrices" tags = [:ols, :iv, :vcov] begin
     using Regress, CSV, DataFrames, LinearAlgebra, StatsBase
     using Regress: fe

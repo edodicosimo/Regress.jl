@@ -514,17 +514,19 @@ end
 ##
 ## Clusters named by column
 ##
-## `CR1(:firm)`, `Cluster(:firm, :year)` and the like name the clusters by column.
-## A model fitted from a formula stores the cluster columns given to `save_cluster`,
-## and the entry points replace the names with that data before any computation.
+## `CR1(:firm)`, `Cluster(:firm, :year)` and the like name the clusters by column, and
+## `DriscollKraay(K; tis = :year, iis = :firm)` names its time and unit indices. A model
+## fitted from a formula stores the columns given to `save_cluster`, and the entry
+## points replace the names with that data before any computation.
 ##
 ##############################################################################
 
 """
     _resolve_clusters(k, m)
 
-`k` with clusters named by column replaced by the cluster data stored in `m`, as an
-estimator of the same type. Any other `k` is returned unchanged.
+`k` with clusters, or Driscoll-Kraay time and unit indices, named by column replaced by
+the data stored in `m`, as an estimator of the same type. Any other `k` is returned
+unchanged.
 """
 _resolve_clusters(k, m) = k
 for E in (:CR0, :CR1, :CR2, :CR3, :Cluster)
@@ -532,10 +534,18 @@ for E in (:CR0, :CR1, :CR2, :CR3, :Cluster)
         return CM.$E(_cluster_vectors(k, m))
     end
 end
+function _resolve_clusters(k::CM.DriscollKraay{<:Any, Symbol, Symbol}, m)
+    tis, iis = _cluster_vectors(k, m)
+    return CM.DriscollKraay(CM.timekernel(k), tis, iis; correction = CM.correction(k))
+end
+
+# The column names that `k` looks up in the stored cluster data.
+_cluster_names(k) = CM.clusters(k)
+_cluster_names(k::CM.DriscollKraay) = (CM.timeindex(k), CM.unitindex(k))
 
 # The stored cluster vectors for the column names of `k`.
 function _cluster_vectors(k, m::OLSEstimator)
-    return map(CM.clusters(k)) do name
+    return map(_cluster_names(k)) do name
         haskey(m.fes.clusters, name) || _cluster_not_found_error(name, m)
         m.fes.clusters[name]
     end
@@ -547,6 +557,14 @@ function _cluster_vectors(k, m::Union{OLSMatrixEstimator, IVMatrixEstimator})
         "$(sprint(show, k)) names its clusters by column, but a model fitted from " *
         "matrices stores no cluster data. Pass the group identifiers instead, " *
         "e.g. `$E(groups)`."))
+end
+
+function _cluster_vectors(
+        k::CM.DriscollKraay, m::Union{OLSMatrixEstimator, IVMatrixEstimator})
+    throw(ArgumentError(
+        "$(sprint(show, k)) names its time and unit indices by column, but a model " *
+        "fitted from matrices stores no data. Pass the indices instead, " *
+        "e.g. `DriscollKraay(K; tis = t, iis = id)`."))
 end
 
 ##############################################################################
@@ -1039,6 +1057,8 @@ Cluster-robust estimators (`CR0`–`CR3`, `Cluster`) may name their clusters by 
 as in `CR1(:firm)` or `CR1(:firm, :year)`, on a model fitted from a formula with
 `save_cluster`; the column data stored with the model is used. A model fitted from
 matrices stores no cluster data and needs the group identifiers, as in `CR1(groups)`.
+In the same way, `DriscollKraay(K; tis = :year, iis = :firm)` looks up its time and unit
+indices in the columns saved with `save_cluster = [:year, :firm]`.
 
 # Finite-sample factors
 Each estimator multiplies the raw sandwich `B · (Σ moments) · B` by one factor, the same
@@ -1101,7 +1121,7 @@ end
 # explains that a `type` keyword belongs in the estimator.
 function CM.vcov(k::CM.DriscollKraay, m::RegressModel; kwargs...)
     _check_keywords(vcov, k, kwargs, (_VCOV_KEYWORDS..., :type))
-    return _regress_vcov(k, m; kwargs...)
+    return _regress_vcov(_resolve_clusters(k, m), m; kwargs...)
 end
 
 function StatsBase.stderror(k::CM.AbstractAsymptoticVarianceEstimator, m::RegressModel;
