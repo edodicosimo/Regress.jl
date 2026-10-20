@@ -202,7 +202,7 @@ function weakivtest(m::IVMatrixEstimator{T}; level::Real = 0.05, tol::Real = 0.0
 
     return _weakivtest_core(
         y_full, X_orig, Xendo_orig, Z_res,
-        k_exo, K, S, _MatrixFirstStage(S, k_exo + K), k,
+        k_exo, K, S, _MatrixFirstStage(m, k_exo + K), k,
         T(level), T(tol), benchmark
     )
 end
@@ -214,15 +214,16 @@ function _weakiv_estimator(m)
     return _uncached(_resolve_clusters(m.vcov_estimator, m))
 end
 
-# The first-stage regression of a matrix-fitted IV model, which has no absorbed fixed
-# effects: `ncoef` counts the exogenous regressors and the excluded instruments.
-struct _MatrixFirstStage
-    nobs::Int
+# The first-stage regression of a matrix-fitted IV model `m`: `ncoef` counts the
+# exogenous regressors and the excluded instruments, and the fixed effects absorbed in
+# `m` are absorbed in it too.
+struct _MatrixFirstStage{M}
+    m::M
     ncoef::Int
 end
-StatsAPI.nobs(f::_MatrixFirstStage) = f.nobs
-StatsAPI.dof_residual(f::_MatrixFirstStage) = f.nobs - f.ncoef
-_cluster_dof(k, f::_MatrixFirstStage) = f.ncoef
+StatsAPI.nobs(f::_MatrixFirstStage) = nobs(f.m)
+StatsAPI.dof_residual(f::_MatrixFirstStage) = nobs(f.m) - f.ncoef - dof_fes(f.m)
+_cluster_dof(k, f::_MatrixFirstStage) = _cluster_dof(k, f.m) - sum(_CM.mask(f.m)) + f.ncoef
 
 ##############################################################################
 ## Core computation (shared by IVEstimator and IVMatrixEstimator methods)

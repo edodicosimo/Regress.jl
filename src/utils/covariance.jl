@@ -793,7 +793,8 @@ single cluster. Without stored fixed-effect groups (a model fitted with
 `save = :minimal`), a fixed effect counts as nested when a cluster column saved with the
 model has its name.
 """
-function _cluster_dof(k, m::Union{OLSEstimator, IVEstimator})
+function _cluster_dof(k,
+        m::Union{OLSEstimator, IVEstimator, OLSMatrixEstimator, IVMatrixEstimator})
     K = sum(CM.mask(m))
     (; names, groups, ngroups, cluster_names) = _fe_structure(m)
     isempty(names) && return K
@@ -808,12 +809,17 @@ function _cluster_dof(k, m::Union{OLSEstimator, IVEstimator})
     end
     return K - (length(names) - 1)
 end
-_cluster_dof(k, m::Union{OLSMatrixEstimator, IVMatrixEstimator}) = sum(CM.mask(m))
 
 function _fe_structure(m::OLSEstimator)
     fes = m.fes
     return (; names = fes.fe_names, groups = fes.fe_groups, ngroups = fes.ngroups,
         cluster_names = keys(fes.clusters))
+end
+
+# Matrix fits always store their fixed-effect groups, so the names only number them.
+function _fe_structure(m::Union{OLSMatrixEstimator, IVMatrixEstimator})
+    return (; names = [Symbol(:fe, i) for i in eachindex(m.fe_groups)],
+        groups = m.fe_groups, ngroups = m.fe_ngroups, cluster_names = ())
 end
 
 """

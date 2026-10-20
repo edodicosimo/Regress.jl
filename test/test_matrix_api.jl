@@ -185,3 +185,78 @@ end
     @test_throws "endogenous_names has 2 names but the model has 1 endogenous variables" first_stage(
         mi; endogenous_names = ["x", "q"])
 end
+
+@testitem "matrix models - absorbed fixed effects" tags = [:ols, :iv, :matrix, :fe] begin
+    using Regress, DataFrames, StableRNGs
+    using Regress: fe
+
+    rng = StableRNG(1)
+    G, T = 40, 15
+    n = G * T
+    id = repeat(1:G, inner = T)
+    t = repeat(1:T, outer = G)
+    pair = (id .+ 1) .÷ 2   # id is nested in pair; t is not
+    x = randn(rng, n) .+ 0.3 .* id ./ G
+    w = randn(rng, n)
+    z = x .+ randn(rng, n)
+    y = x .- 0.5 .* w .+ randn(rng, G)[id] .+ randn(rng, n)
+    wt = 0.5 .+ rand(rng, n)
+    df = DataFrame(; y, x, w, z, id, t, pair, wt)
+    opts = (; tol = 1e-12, drop_singletons = false, save_cluster = [:id, :pair, :t])
+    xcopy = copy(x)
+
+    # OLS, one fixed effect: coefficients, HC1, R², and CR1 with the fixed effect
+    # nested in the cluster (id, pair) and not nested (t)
+    mf = Regress.ols(df, @formula(y ~ x + w + fe(id)); opts...)
+    mm = Regress.ols([x w], y; fe = id, coefnames = ["x", "w"])
+    @test x == xcopy
+    @test coef(mm) ≈ coef(mf)
+    @test stderror(mm) ≈ stderror(mf)
+    @test dof_residual(mm) == dof_residual(mf) == n - 2 - G
+    @test r2(mm) ≈ r2(mf)
+    @test adjr2(mm) ≈ adjr2(mf)
+    for c in (:id, :pair, :t)
+        @test stderror(mm + vcov(CR1(df[!, c]))) ≈ stderror(mf + vcov(CR1(c)))
+    end
+
+    # Two fixed effects, and weights
+    mf2 = Regress.ols(df, @formula(y ~ x + w + fe(id) + fe(t)); opts...)
+    mm2 = Regress.ols([x w], y; fe = (id, t))
+    @test coef(mm2) ≈ coef(mf2)
+    @test stderror(mm2) ≈ stderror(mf2)
+    @test dof_residual(mm2) == dof_residual(mf2)
+    @test stderror(mm2 + vcov(CR1(pair))) ≈ stderror(mf2 + vcov(CR1(:pair)))
+    mfw = Regress.ols(df, @formula(y ~ x + w + fe(id)); weights = :wt, opts...)
+    mmw = Regress.ols([x w], y; fe = id, weights = wt)
+    @test coef(mmw) ≈ coef(mfw)
+    @test stderror(mmw) ≈ stderror(mfw)
+
+    # TSLS, with first-stage and weak-instrument statistics
+    mfi = Regress.iv(TSLS(), df, @formula(y ~ w + (x ~ z) + fe(id)); opts...)
+    mmi = Regress.iv(TSLS(), [w z], [w x], y; fe = id, coefnames = ["w", "x"])
+    @test coef(mmi) ≈ coef(mfi)
+    @test stderror(mmi) ≈ stderror(mfi)
+    @test dof_residual(mmi) == dof_residual(mfi)
+    for c in (:id, :pair, :t)
+        mmc = mmi + vcov(CR1(df[!, c]))
+        mfc = mfi + vcov(CR1(c))
+        @test stderror(mmc) ≈ stderror(mfc)
+        @test first_stage(mmc).F_robust ≈ first_stage(mfc).F_robust
+        @test weakivtest(mmc).F_eff ≈ weakivtest(mfc).F_eff
+    end
+    fsm, fsf = first_stage(mmi), first_stage(mfi)
+    @test fsm.F_nonrobust ≈ fsf.F_nonrobust
+    @test fsm.df2 == fsf.df2
+
+    # Without `fe`, nothing is absorbed
+    @test dof_residual(Regress.ols([ones(n) x w], y)) == n - 3
+
+    @test_throws "the fixed effects absorb the intercept" Regress.ols(
+        [x w], y; fe = id, has_intercept = true)
+    @test_throws "fixed effect 1 has 10 observations but y has $n" Regress.ols(
+        [x w], y; fe = id[1:10])
+    @test_throws "fixed effect 1 has missing values" Regress.ols(
+        [x w], y; fe = Union{Int, Missing}[id[1:(end - 1)]; missing])
+    @test_throws "did not converge" Regress.ols(
+        [x w], y; fe = (id, pair .+ t), fe_maxiter = 1, fe_tol = 1e-30)
+end

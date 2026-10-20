@@ -113,7 +113,16 @@ design matrices. Compatible with CovarianceMatrices.jl for robust inference.
 - `collinearity::Symbol = :qr`: Collinearity detection method (`:qr` or `:sweep`)
 - `tol::Real = 1e-8`: Tolerance for collinearity detection
 - `weights::Union{Nothing, AbstractVector} = nothing`: Observation weights
-- `has_intercept::Bool = true`: Whether model includes an intercept (for R² computation)
+- `fe = nothing`: Fixed effects to absorb: one grouping vector of length n, or a tuple of
+  them. `y` and the columns of `X` are demeaned on the groups, as `fe(...)` terms do in
+  `ols(df, formula)`, and the absorbed levels enter the degrees of freedom and the
+  cluster-robust small-sample correction. Rows are not dropped: a singleton group fits
+  its observation exactly. The fixed effects absorb the intercept, so `X` must not
+  contain an intercept column.
+- `fe_tol::Real = 1e-8`, `fe_maxiter::Integer = 10000`: Tolerance and iteration limit of
+  the demeaning; failure to converge throws an error
+- `has_intercept::Bool = fe === nothing`: Whether model includes an intercept (for R²
+  computation); `true` together with `fe` throws an `ArgumentError`
 - `coefnames = nothing`: One name per column of `X`, returned by `coefnames(model)` and
   shown by `coeftable(model)`; the default is `["x1", ..., "xk"]`
 
@@ -171,7 +180,10 @@ function ols(X::AbstractMatrix{<:Real}, y::AbstractVector{<:Real};
         collinearity::Symbol = :qr,
         tol::Real = 1e-8,
         weights::Union{Nothing, AbstractVector} = nothing,
-        has_intercept::Bool = true,
+        fe = nothing,
+        fe_tol::Real = 1e-8,
+        fe_maxiter::Integer = 10000,
+        has_intercept::Bool = fe === nothing,
         coefnames::Union{Nothing, AbstractVector} = nothing)
 
     # Fit is 1-based: X and y are materialized into `Matrix`/`Vector` and indexed
@@ -184,6 +196,8 @@ function ols(X::AbstractMatrix{<:Real}, y::AbstractVector{<:Real};
     length(y) == n ||
         throw(DimensionMismatch("X has $n rows but y has $(length(y)) elements"))
     names = _matrix_coefnames(coefnames, k)
+    fes = _matrix_fixedeffects(fe, n, has_intercept)
+    has_fes = !isempty(fes)
 
     # Validate keywords
     factorization in (:auto, :chol, :qr) ||
@@ -195,20 +209,33 @@ function ols(X::AbstractMatrix{<:Real}, y::AbstractVector{<:Real};
     T = promote_type(eltype(X), eltype(y))
     T <: AbstractFloat || (T = Float64)
 
-    # Convert to Matrix{T} and Vector{T} (materializes views)
-    X_mat = convert(Matrix{T}, X)
-    y_vec = convert(Vector{T}, y)
+    # Convert to Matrix{T} and Vector{T} (materializes views). Demeaning works in
+    # place, so with fixed effects the inputs are always copied.
+    X_mat = has_fes ? Matrix{T}(X) : convert(Matrix{T}, X)
+    y_vec = has_fes ? Vector{T}(y) : convert(Vector{T}, y)
+    y_tss = has_fes ? copy(y_vec) : y_vec  # the response before demeaning
 
     # Handle weights
     has_weights = weights !== nothing
     if has_weights
         length(weights) == n || throw(DimensionMismatch("weights must have length $n"))
         wts_vec = convert(Vector{T}, weights)
+    else
+        wts_vec = T[]
+    end
+
+    # Absorb the fixed effects with the weights, before the √w scaling, as `ols(df, formula)`
+    if has_fes
+        cols = AbstractVector{T}[y_vec, eachcol(X_mat)...]
+        _absorb_matrix_fes!(cols, vcat("y", names), fes,
+            has_weights ? Weights(wts_vec) : uweights(n), fe_tol, fe_maxiter, T)
+    end
+
+    if has_weights
         sqrtw = sqrt.(wts_vec)
         X_mat = X_mat .* sqrtw
         y_vec = y_vec .* sqrtw
-    else
-        wts_vec = T[]
+        y_tss = y_tss .* sqrtw
     end
 
     # Choose factorization
@@ -220,14 +247,8 @@ function ols(X::AbstractMatrix{<:Real}, y::AbstractVector{<:Real};
     mu = similar(y_vec)
     rr = OLSResponse(y_vec, mu, wts_vec, T[], :y)
 
-    # Compute TSS (before fitting, for R² calculation)
-    if has_intercept
-        ymean = mean(y_vec)
-        tss = sum(abs2, y_vec .- ymean)
-    else
-        # For models without intercept, TSS = sum(y^2)
-        tss = sum(abs2, y_vec)
-    end
+    # TSS for R²: centered with an intercept or absorbed fixed effects, else sum(y^2)
+    tss = has_intercept | has_fes ? sum(abs2, y_tss .- mean(y_tss)) : sum(abs2, y_tss)
 
     # Fit using unified solver
     pp, basis_coef,
@@ -238,8 +259,10 @@ function ols(X::AbstractMatrix{<:Real}, y::AbstractVector{<:Real};
     rss = compute_rss(rr.y, rr.mu)
 
     # Degrees of freedom
+    fe_groups, fe_ngroups = _matrix_fe_groups(fes)
+    dof_fes = sum(fe_ngroups; init = 0)
     dof_model = sum(basis_coef)
-    dof_res = max(1, n - dof_model)
+    dof_res = max(1, n - dof_model - dof_fes)
 
     # R-squared
     r2_val = 1 - rss / tss
@@ -250,7 +273,7 @@ function ols(X::AbstractMatrix{<:Real}, y::AbstractVector{<:Real};
 
     vcov_matrix = compute_hc1_vcov_direct(
         pp.X, residuals_vcov, invXX, basis_coef,
-        n, dof_model, 0, dof_res  # No fixed effects
+        n, dof_model, dof_fes, dof_res
     )
 
     # Standard errors
@@ -268,7 +291,7 @@ function ols(X::AbstractMatrix{<:Real}, y::AbstractVector{<:Real};
     return OLSMatrixEstimator{T, typeof(pp), typeof(default_vcov), typeof(vcov_matrix)}(
         rr, pp, basis_coef,
         n, dof_model, dof_res,
-        T(rss), T(tss), T(r2_val), has_intercept, names,
+        T(rss), T(tss), T(r2_val), has_intercept, names, fe_groups, fe_ngroups,
         default_vcov, vcov_matrix, se, t_stats, p_values
     )
 end
@@ -387,7 +410,8 @@ end
 
 """
     iv(::TSLS, Z::AbstractMatrix, X::AbstractMatrix, y::AbstractVector;
-       has_intercept::Bool=true, n_endogenous::Int=1, coefnames=nothing) -> IVMatrixEstimator
+       n_endogenous::Int=1, fe=nothing, has_intercept::Bool=fe === nothing,
+       coefnames=nothing) -> IVMatrixEstimator
 
 Estimate an IV model using Two-Stage Least Squares with matrix inputs.
 
@@ -397,8 +421,12 @@ Estimate an IV model using Two-Stage Least Squares with matrix inputs.
 - `y::AbstractVector`: Response vector
 
 # Keyword Arguments
-- `has_intercept::Bool=true`: Whether the model includes an intercept (affects DOF calculation)
 - `n_endogenous::Int=1`: Number of endogenous variables (last n_endogenous columns of X)
+- `fe=nothing`, `fe_tol=1e-8`, `fe_maxiter=10000`: Fixed effects to absorb, as in
+  [`ols(X, y)`](@ref); `y` and the columns of `X` and `Z` are demeaned on the groups.
+  `first_stage` and `weakivtest` count the absorbed levels.
+- `has_intercept::Bool=fe === nothing`: Whether the model includes an intercept (for R²
+  computation); `true` together with `fe` throws an `ArgumentError`
 - `coefnames=nothing`: One name per column of `X`, returned by `coefnames(model)` and
   shown by `coeftable(model)`; the default is `["x1", ..., "xk"]`. `first_stage(model)`
   names the endogenous variables and the exogenous regressors from it.
@@ -442,8 +470,11 @@ See also: [`iv(::TSLS, df, formula)`](@ref), [`IVMatrixEstimator`](@ref)
 """
 function iv(estimator::TSLS, Z::AbstractMatrix{<:Real}, X::AbstractMatrix{<:Real},
         y::AbstractVector{<:Real};
-        has_intercept::Bool = true,
         n_endogenous::Int = 1,
+        fe = nothing,
+        fe_tol::Real = 1e-8,
+        fe_maxiter::Integer = 10000,
+        has_intercept::Bool = fe === nothing,
         coefnames::Union{Nothing, AbstractVector} = nothing)
 
     # Fit is 1-based: Z, X, y are materialized into `Matrix`/`Vector` and indexed
@@ -461,6 +492,8 @@ function iv(estimator::TSLS, Z::AbstractMatrix{<:Real}, X::AbstractMatrix{<:Real
     n_endogenous <= size(X, 2) ||
         throw(ArgumentError("n_endogenous ($n_endogenous) > number of X columns ($(size(X,2)))"))
     names = _matrix_coefnames(coefnames, size(X, 2))
+    fes = _matrix_fixedeffects(fe, n, has_intercept)
+    has_fes = !isempty(fes)
 
     # Check order condition
     k_x = size(X, 2)
@@ -474,10 +507,18 @@ function iv(estimator::TSLS, Z::AbstractMatrix{<:Real}, X::AbstractMatrix{<:Real
     T = promote_type(eltype(X), eltype(Z), eltype(y))
     T <: AbstractFloat || (T = Float64)
 
-    # Convert to concrete types
-    X_mat = convert(Matrix{T}, X)
-    Z_mat = convert(Matrix{T}, Z)
-    y_vec = convert(Vector{T}, y)
+    # Convert to concrete types. Demeaning works in place, so with fixed effects the
+    # inputs are always copied.
+    X_mat = has_fes ? Matrix{T}(X) : convert(Matrix{T}, X)
+    Z_mat = has_fes ? Matrix{T}(Z) : convert(Matrix{T}, Z)
+    y_vec = has_fes ? Vector{T}(y) : convert(Vector{T}, y)
+    y_tss = has_fes ? copy(y_vec) : y_vec  # the response before demeaning
+
+    if has_fes
+        cols = AbstractVector{T}[y_vec, eachcol(X_mat)..., eachcol(Z_mat)...]
+        colnames = vcat("y", names, ["z$i" for i in axes(Z_mat, 2)])
+        _absorb_matrix_fes!(cols, colnames, fes, uweights(n), fe_tol, fe_maxiter, T)
+    end
 
     # Compute projection matrix P_Z = Z(Z'Z)^{-1}Z'
     ZZ = Z_mat' * Z_mat
@@ -521,13 +562,14 @@ function iv(estimator::TSLS, Z::AbstractMatrix{<:Real}, X::AbstractMatrix{<:Real
     # Degrees of freedom
     k = size(X_mat, 2)
     basis_coef = trues(k)  # No collinearity detection for simplicity
+    fe_groups, fe_ngroups = _matrix_fe_groups(fes)
+    dof_fes = sum(fe_ngroups; init = 0)
     dof_model = sum(basis_coef)
-    dof_res = max(1, n - dof_model)
+    dof_res = max(1, n - dof_model - dof_fes)
 
-    # Sum of squares
+    # Sum of squares; TSS is centered with an intercept or absorbed fixed effects
     rss = sum(abs2, residuals)
-    ymean = mean(y_vec)
-    tss = has_intercept ? sum(abs2, y_vec .- ymean) : sum(abs2, y_vec)
+    tss = has_intercept | has_fes ? sum(abs2, y_tss .- mean(y_tss)) : sum(abs2, y_tss)
     r2_val = 1 - rss / tss
 
     # Post-estimation data for vcov
@@ -539,9 +581,9 @@ function iv(estimator::TSLS, Z::AbstractMatrix{<:Real}, X::AbstractMatrix{<:Real
     default_vcov = CovarianceMatrices.HC1()
 
     # Compute HC1 variance-covariance matrix
-    # Sandwich: V = n * (X̂'X̂)^{-1} * (X̂'diag(e²)X̂ * n/(n-k)) / n * (X̂'X̂)^{-1}
-    #           = (n/(n-k)) * (X̂'X̂)^{-1} * X̂'diag(e²)X̂ * (X̂'X̂)^{-1}
-    scale_hc1 = T(n) / T(n - k)
+    # Sandwich: V = (n/dof_res) * (X̂'X̂)^{-1} * X̂'diag(e²)X̂ * (X̂'X̂)^{-1},
+    # with dof_res = n - k - (absorbed fixed-effect levels)
+    scale_hc1 = T(n) / T(dof_res)
     Xe = X_hat .* residuals
     # Form the sandwich as B*B' (B = (X̂'X̂)⁻¹ X̂'diag(e)) so it is PSD even when X̂'X̂ is nearly
     # singular (weak first stage): A*M*A can then have negative diagonal entries from cancellation.
@@ -567,6 +609,8 @@ function iv(estimator::TSLS, Z::AbstractMatrix{<:Real}, X::AbstractMatrix{<:Real
         T(r2_val),
         has_intercept,
         names,
+        fe_groups,
+        fe_ngroups,
         default_vcov,
         vcov_matrix,
         se,

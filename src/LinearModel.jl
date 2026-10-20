@@ -134,6 +134,9 @@ Use `ols(X, y)` to fit this model type.
 - `r2::T`: R-squared
 - `has_intercept::Bool`: Whether model has intercept (assumed from first column)
 - `coefnames::Vector{String}`: Coefficient names, one per column of `X`
+- `fe_groups::Vector{Vector{Int}}`: Group codes of each absorbed fixed effect (empty
+  without fixed effects)
+- `fe_ngroups::Vector{Int}`: Number of levels of each absorbed fixed effect
 - `vcov_estimator::V`: Variance-covariance estimator used to compute `vcov_matrix`
 - `vcov_matrix::C`: Precomputed variance-covariance matrix
 - `se::Vector{T}`: Standard errors
@@ -170,6 +173,8 @@ struct OLSMatrixEstimator{T <: AbstractFloat, P <: OLSLinearPredictor{T}, V,
     r2::T                           # R-squared
     has_intercept::Bool             # Whether model has intercept
     coefnames::Vector{String}       # One name per column of X
+    fe_groups::Vector{Vector{Int}}  # Group codes of each absorbed fixed effect
+    fe_ngroups::Vector{Int}         # Number of levels of each absorbed fixed effect
 
     # Variance-covariance estimator and precomputed statistics
     vcov_estimator::V                        # Estimator used to compute vcov_matrix
@@ -180,8 +185,8 @@ struct OLSMatrixEstimator{T <: AbstractFloat, P <: OLSLinearPredictor{T}, V,
 end
 
 has_iv(::OLSMatrixEstimator) = false
-has_fe(::OLSMatrixEstimator) = false
-dof_fes(::OLSMatrixEstimator) = 0
+has_fe(m::OLSMatrixEstimator) = !isempty(m.fe_groups)
+dof_fes(m::OLSMatrixEstimator) = sum(m.fe_ngroups; init = 0)
 model_hasintercept(m::OLSMatrixEstimator) = m.has_intercept
 
 # Names of a matrix fit's coefficients: the `coefnames` keyword, or `x1, ..., xk`.
@@ -190,6 +195,47 @@ function _matrix_coefnames(names, k::Integer)
     length(names) == k || throw(DimensionMismatch(
         "coefnames has $(length(names)) names but the design matrix has $k columns"))
     return String[string(n) for n in names]
+end
+
+# The fixed effects of a matrix fit's `fe` keyword: `nothing`, one grouping vector of
+# length `n`, or a tuple (or vector) of them.
+function _matrix_fixedeffects(fe, n::Integer, has_intercept::Bool)
+    fe === nothing && return FixedEffect[]
+    has_intercept && throw(ArgumentError(
+        "has_intercept = true with absorbed fixed effects: the fixed effects absorb " *
+        "the intercept, so drop the intercept column from the design and pass " *
+        "has_intercept = false (the default with `fe`)"))
+    groups = fe isa Tuple || (fe isa AbstractVector && !isempty(fe) &&
+              all(g -> g isa AbstractVector, fe)) ? fe : (fe,)
+    isempty(groups) && throw(ArgumentError("`fe` names no fixed effects"))
+    fes = FixedEffect[]
+    for (j, g) in enumerate(groups)
+        g isa AbstractVector || throw(ArgumentError(
+            "fixed effect $j must be a vector of group identifiers, got $(typeof(g))"))
+        Base.require_one_based_indexing(g)
+        length(g) == n || throw(DimensionMismatch(
+            "fixed effect $j has $(length(g)) observations but y has $n"))
+        any(ismissing, g) && throw(ArgumentError("fixed effect $j has missing values"))
+        push!(fes, FixedEffect(g))
+    end
+    return fes
+end
+
+# Group codes and number of levels of each fixed effect, as `_cluster_dof` reads them.
+function _matrix_fe_groups(fes)
+    return [Vector{Int}(fe.refs) for fe in fes], Int[nunique(fe) for fe in fes]
+end
+
+# Demean `cols` in place on `fes` with the solver of `ols(df, formula)`, which also zeroes
+# the columns the fixed effects explain.
+function _absorb_matrix_fes!(cols, colnames, fes, wts, tol, maxiter, ::Type{T}) where {T}
+    _, iterations, converged, _, _, _ = partial_out_fixed_effects!(
+        cols, colnames, fes, wts, :cpu, Threads.nthreads(), tol, maxiter, false,
+        false, false, true, T)
+    converged || throw(ErrorException(
+        "demeaning on the fixed effects did not converge in $iterations iterations; " *
+        "increase fe_maxiter or fe_tol"))
+    return cols
 end
 
 """
@@ -263,10 +309,9 @@ StatsAPI.stderror(m::OLSMatrixEstimator) = m.se
 # Adjusted R2 - kept specialized because AbstractRegressModel relies on formula()
 function StatsAPI.adjr2(m::OLSMatrixEstimator)
     n = nobs(m)
-    k = dof(m)
     dev = deviance(m)
     dev0 = nulldeviance(m)
-    return 1 - (dev * (n - m.has_intercept)) / (dev0 * max(n - k, 1))
+    return 1 - (dev * (n - (m.has_intercept | has_fe(m)))) / (dev0 * dof_residual(m))
 end
 
 ##############################################################################
@@ -287,7 +332,7 @@ function Base.:+(m::OLSMatrixEstimator{T, P, V1}, v::VcovSpec{V2}) where {T, P, 
     return OLSMatrixEstimator{T, P, V2, typeof(vcov_mat)}(
         m.rr, m.pp, m.basis_coef,
         m.nobs, m.dof, m.dof_residual,
-        m.rss, m.tss, m.r2, m.has_intercept, m.coefnames,
+        m.rss, m.tss, m.r2, m.has_intercept, m.coefnames, m.fe_groups, m.fe_ngroups,
         v.source, vcov_mat, se, t_stats, p_values
     )
 end

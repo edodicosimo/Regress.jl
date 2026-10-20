@@ -1468,6 +1468,9 @@ Designed for programmatic use (e.g., LocalProjections.jl).
 - `r2::T`: R-squared
 - `has_intercept::Bool`: Whether model includes intercept
 - `coefnames::Vector{String}`: Coefficient names, one per column of `X`
+- `fe_groups::Vector{Vector{Int}}`: Group codes of each absorbed fixed effect (empty
+  without fixed effects)
+- `fe_ngroups::Vector{Int}`: Number of levels of each absorbed fixed effect
 - `vcov_estimator::V`: Variance estimator used
 - `vcov_matrix::C`: Precomputed variance-covariance matrix
 - `se::Vector{T}`: Standard errors
@@ -1497,6 +1500,8 @@ struct IVMatrixEstimator{T <: AbstractFloat, E <: AbstractIVEstimator, V,
     r2::T
     has_intercept::Bool
     coefnames::Vector{String}
+    fe_groups::Vector{Vector{Int}}
+    fe_ngroups::Vector{Int}
 
     # Variance-covariance
     vcov_estimator::V
@@ -1509,8 +1514,8 @@ end
 _estimator_name(m::IVMatrixEstimator) = _estimator_name(m.estimator)
 
 has_iv(::IVMatrixEstimator) = true
-has_fe(::IVMatrixEstimator) = false
-dof_fes(::IVMatrixEstimator) = 0
+has_fe(m::IVMatrixEstimator) = !isempty(m.fe_groups)
+dof_fes(m::IVMatrixEstimator) = sum(m.fe_ngroups; init = 0)
 model_hasintercept(m::IVMatrixEstimator) = m.has_intercept
 
 ##############################################################################
@@ -1720,6 +1725,8 @@ function Base.:+(m::IVMatrixEstimator{T, E, V1}, v::VcovSpec{V2}) where {T, E, V
         m.r2,
         m.has_intercept,
         m.coefnames,
+        m.fe_groups,
+        m.fe_ngroups,
         v.source,
         new_vcov,
         new_se,
@@ -1790,7 +1797,11 @@ function first_stage(m::IVMatrixEstimator{T};
     fs_names = vcat(coefnames(m)[1:k_exo], instr_names)
 
     # Step 1: Run first-stage OLS regressions (xendo_j on full Z)
-    fs_models = [ols(Z, Xendo[:, i]; has_intercept = m.has_intercept, coefnames = fs_names)
+    # On a model with absorbed fixed effects, X and Z are already demeaned; passing the
+    # groups again makes the first-stage fits count the absorbed levels.
+    fe = has_fe(m) ? Tuple(m.fe_groups) : nothing
+    fs_models = [ols(Z, Xendo[:, i]; has_intercept = m.has_intercept, fe,
+                     coefnames = fs_names)
                  for i in 1:n_endo]
 
     # Step 2: Compute residualized data for F-statistics
@@ -1821,7 +1832,7 @@ function first_stage(m::IVMatrixEstimator{T};
     QR_Z = qr(Z_res)
     Zs = Matrix(QR_Z.Q)[:, 1:K] .* sqrt(T(S))
     L = k_exo
-    dof_omega = S - K - L
+    dof_omega = S - K - L - dof_fes(m)
 
     F_nonrobust = Vector{T}(undef, n_endo)
     p_nonrobust = Vector{T}(undef, n_endo)
@@ -1838,9 +1849,10 @@ function first_stage(m::IVMatrixEstimator{T};
     F_robust,
     p_robust = compute_per_endogenous_fstats(
         Xendo_res, Z_res, Pi,
-        m.vcov_estimator, 0;
+        m.vcov_estimator, dof_fes(m);
         Xendo_orig = Xendo,
-        newZ = Z
+        newZ = Z,
+        first_stage = _MatrixFirstStage(m, k_exo + K)
     )
 
     return FirstStageIV{T, eltype(fs_models)}(
