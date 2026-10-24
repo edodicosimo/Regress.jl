@@ -22,8 +22,8 @@ jobs:
         with:
           julia-version: '1'
           tune: 'false'
-          # The pull request's own script, run on both revisions. Passing it explicitly
-          # also keeps benchmark/Project.toml (CUDA, MKL, RCall, ... for the other
-          # scripts in benchmark/) out of the environment.
+          # The pull request's own script, run on both revisions, with the packages it
+          # loads besides Regress and BenchmarkTools (which AirspeedVelocity adds).
+          # benchmark/run_asv.jl uses the same list.
           script: benchmark/benchmarks.jl
-          extra-pkgs: BenchmarkTools,CovarianceMatrices,DataFrames,StableRNGs
+          extra-pkgs: CovarianceMatrices,DataFrames,StableRNGs
