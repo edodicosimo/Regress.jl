@@ -134,14 +134,15 @@ export islinear, responsename, leverage
 ##############################################################################
 
 """
-    esample(model::Union{OLSEstimator, IVEstimator, FixedEffectModel}, v::AbstractVector)
+    esample(model, v::AbstractVector)
 
-Return a boolean vector indicating which observations in `v` were used in fitting `model`.
-
-# Arguments
-- `model`: A fitted model (OLSEstimator, IVEstimator, or FixedEffectModel)
+The entries of `v`, which has one entry per row of the data `model` was fitted on, in the
+rows of the estimation sample. `model` is an `OLSEstimator`, `IVEstimator`,
+`OLSMatrixEstimator` or `IVMatrixEstimator`.
 """
-function esample(m::Union{OLSEstimator, IVEstimator}, v::AbstractVector)
+function esample(
+        m::Union{OLSEstimator, IVEstimator, OLSMatrixEstimator, IVMatrixEstimator},
+        v::AbstractVector)
     length(v) == length(m.esample) ||
         throw(ArgumentError("Vector length ($(length(v))) must match original data length ($(length(m.esample)))"))
     return v[m.esample]

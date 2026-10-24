@@ -100,8 +100,7 @@ function nullloglikelihood_within(m::AbstractRegressModel)
 end
 
 # The parameter count is `nobs - dof_residual`: estimated coefficients plus
-# absorbed fixed-effect levels. `dof(model)` cannot stand in for it, because
-# OLS counts the intercept in `dof` while IV does not.
+# absorbed fixed-effect levels. `dof(model)` counts only the coefficients.
 function StatsAPI.adjr2(model::AbstractRegressModel, variant::Symbol = :devianceratio)
     n = nobs(model)
     # The null model fits one parameter when the null deviance is centered

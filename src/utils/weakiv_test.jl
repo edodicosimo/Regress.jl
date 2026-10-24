@@ -132,19 +132,14 @@ function weakivtest(m::IVEstimator{T}; level::Real = 0.05, tol::Real = 0.001,
     K = size(fsd.Z_res, 2)  # Number of excluded instruments
     S = nobs(m)              # Number of observations
 
-    # Reconstruct y = residuals + X * beta
-    model_resid = residuals_for_vcov(m)
-    X_orig = pe.X_original
-    y_full = model_resid .+ X_orig * m.coef
-
-    k_total = size(X_orig, 2)
-    k_exo = k_total - n_endo
-
+    # The first-stage design is [Xexo, Z]
+    k_exo = fsd.n_exo
+    Xexo = fsd.newZ[:, 1:k_exo]
     Xendo_orig = fsd.Xendo_orig[:, 1]
     Z_res = fsd.Z_res
 
     return _weakivtest_core(
-        y_full, X_orig, Xendo_orig, Z_res,
+        pe.y, Xexo, Xendo_orig, Z_res,
         k_exo, K, S, _FirstStage(m), k,
         T(level), T(tol), benchmark
     )
@@ -170,24 +165,22 @@ A `WeakIVTestResult` containing effective F, robust F, critical values, etc.
 function weakivtest(m::IVMatrixEstimator{T}; level::Real = 0.05, tol::Real = 0.001,
         benchmark::Symbol = :nagar) where {T}
     pe = m.postestimation
-    n_endo = pe.n_endogenous
+    n_endo = length(pe.endo_cols)
     n_endo == 1 ||
         throw(ArgumentError("weakivtest requires exactly one endogenous regressor, got $n_endo."))
     k = _weakiv_estimator(m)
 
-    X_orig = pe.X              # [Xexo, Xendo]
-    k_total = size(X_orig, 2)
-    k_exo = k_total - n_endo
+    # Z holds the exogenous columns of X, in order, then the excluded instruments.
+    exo_cols = _exo_cols(pe)
+    k_exo = length(exo_cols)
+    Xexo = pe.X[:, exo_cols]
+    Xendo_orig = pe.X[:, only(pe.endo_cols)]
 
-    Xendo_orig = X_orig[:, k_exo + 1]  # single endogenous column
-
-    # Extract excluded instruments from Z = [Xexo, Zinstr]
     Z_instr = pe.Z[:, (k_exo + 1):end]
     K = size(Z_instr, 2)
 
     # Residualize excluded instruments from exogenous regressors
     if k_exo > 0
-        Xexo = X_orig[:, 1:k_exo]
         QR_exo = qr(Xexo)
         Q_exo = Matrix(QR_exo.Q)
         Z_res = Z_instr .- Q_exo * (Q_exo' * Z_instr)
@@ -197,11 +190,8 @@ function weakivtest(m::IVMatrixEstimator{T}; level::Real = 0.05, tol::Real = 0.0
 
     S = nobs(m)
 
-    # Reconstruct y = residuals + X * beta
-    y_full = pe.residuals .+ X_orig * m.coef
-
     return _weakivtest_core(
-        y_full, X_orig, Xendo_orig, Z_res,
+        pe.y, Xexo, Xendo_orig, Z_res,
         k_exo, K, S, _MatrixFirstStage(m, k_exo + K), k,
         T(level), T(tol), benchmark
     )
@@ -230,15 +220,15 @@ _cluster_dof(k, f::_MatrixFirstStage) = _cluster_dof(k, f.m) - sum(_CM.mask(f.m)
 ##############################################################################
 
 """
-    _weakivtest_core(y_full, X_orig, Xendo_orig, Z_res, k_exo, K, S, fs,
+    _weakivtest_core(y, Xexo, Xendo_orig, Z_res, k_exo, K, S, fs,
                      vcov_est, level, eps, benchmark) -> WeakIVTestResult
 
 Internal computational core for the weak IV test. Both `weakivtest(::IVEstimator)`
 and `weakivtest(::IVMatrixEstimator)` delegate here after extracting data.
 
 # Arguments
-- `y_full`: Reconstructed response vector (residuals + X*β)
-- `X_orig`: Original regressor matrix [Xexo, Xendo]
+- `y`: Response vector of the fit (demeaned and weighted as its regressors)
+- `Xexo`: Exogenous regressors (`k_exo` columns)
 - `Xendo_orig`: Original endogenous variable (vector)
 - `Z_res`: Excluded instruments residualized from exogenous regressors
 - `k_exo`: Number of exogenous regressors (including intercept column if present)
@@ -253,14 +243,13 @@ and `weakivtest(::IVMatrixEstimator)` delegate here after extracting data.
 - `benchmark`: Bias benchmark (:nagar or :ols)
 """
 function _weakivtest_core(
-        y_full::Vector{T}, X_orig::Matrix{T},
+        y_full::Vector{T}, Xexo::Matrix{T},
         Xendo_orig::Vector{T}, Z_res::Matrix{T},
         k_exo::Int, K::Int, S::Int, fs,
         vcov_est, level::T, eps::T, benchmark::Symbol
 ) where {T}
     # Step 1: Partial out exogenous regressors from y and Xendo
     if k_exo > 0
-        Xexo = X_orig[:, 1:k_exo]
         QR_exo = qr(Xexo)
         Q_exo = Matrix(QR_exo.Q)
         y_res = y_full .- Q_exo * (Q_exo' * y_full)

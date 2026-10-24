@@ -539,6 +539,35 @@ function _resolve_clusters(k::CM.DriscollKraay{<:Any, Symbol, Symbol}, m)
     return CM.DriscollKraay(CM.timekernel(k), tis, iis; correction = CM.correction(k))
 end
 
+# A model fitted from matrices takes per-observation data (cluster identifiers,
+# Driscoll-Kraay indices) with one entry per row of its input, or one per observation;
+# the first is restricted to the estimation sample.
+function _sample_rows(v::AbstractVector, m::Union{OLSMatrixEstimator, IVMatrixEstimator},
+        what::String)
+    length(v) == nobs(m) && return v
+    length(v) == length(m.esample) && return esample(m, v)
+    throw(DimensionMismatch(
+        "the $what has $(length(v)) observations; the model was fitted on " *
+        "$(length(m.esample)) rows, of which $(nobs(m)) are in the estimation sample"))
+end
+
+for E in (:CR0, :CR1, :CR2, :CR3, :Cluster)
+    @eval function _resolve_clusters(
+            k::CM.$E{<:Tuple{CM.Clustering, Vararg{CM.Clustering}}},
+            m::Union{OLSMatrixEstimator, IVMatrixEstimator})
+        return CM.$E(map(c -> _sample_rows(CM.groups(c), m, "cluster variable"),
+            CM.clusters(k)))
+    end
+end
+function _resolve_clusters(
+        k::CM.DriscollKraay{<:Any, <:AbstractVector, <:AbstractVector},
+        m::Union{OLSMatrixEstimator, IVMatrixEstimator})
+    return CM.DriscollKraay(CM.timekernel(k),
+        _sample_rows(CM.timeindex(k), m, "Driscoll-Kraay time index"),
+        _sample_rows(CM.unitindex(k), m, "Driscoll-Kraay unit index");
+        correction = CM.correction(k))
+end
+
 # The column names that `k` looks up in the stored cluster data.
 _cluster_names(k) = CM.clusters(k)
 _cluster_names(k::CM.DriscollKraay) = (CM.timeindex(k), CM.unitindex(k))

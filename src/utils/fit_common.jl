@@ -53,6 +53,36 @@ function validate_nthreads(method::Symbol, nthreads::Integer)
     return nthreads
 end
 
+"""
+    _renamed_keyword(value, old_value, name, old_name, caller, default)
+
+The value of keyword `name` of `caller`, which also accepts its deprecated name
+`old_name`. Both keywords default to `nothing`; passing both throws.
+"""
+function _renamed_keyword(value, old_value, name::Symbol, old_name::Symbol,
+        caller::Symbol, default)
+    old_value === nothing && return value === nothing ? default : value
+    value === nothing || throw(ArgumentError(
+        "pass `$name` only; `$old_name` is its deprecated name"))
+    Base.depwarn("keyword `$old_name` of `$caller` is deprecated; use `$name`.", caller)
+    return old_value
+end
+
+"""
+    _check_weights(w, name)
+
+Throw unless every weight in `w` (ignoring `missing`) is finite and nonnegative. Rows
+with zero weight are then dropped from the estimation sample.
+"""
+function _check_weights(w, name)
+    for x in w
+        ismissing(x) || (isfinite(x) && x >= 0) ||
+            throw(ArgumentError(
+                "weights must be finite and nonnegative; $name has the value $x"))
+    end
+    return nothing
+end
+
 ##############################################################################
 ##
 ## Helper Functions for Predict - Check for FE/continuous interactions
@@ -146,6 +176,7 @@ function prepare_data(df::DataFrame,
     # Create estimation sample
     esample = completecases(df, all_vars)
     if has_weights_flag
+        _check_weights(df[!, weights], "column $weights")
         esample .&= BitArray(!ismissing(x) && (x > 0) for x in df[!, weights])
     end
     if subset !== nothing
@@ -477,6 +508,20 @@ function solve_fixed_effects!(residuals::AbstractVector,
         end
     end
     return augmentdf
+end
+
+"""
+    _fe_dof(ngroups, n_intercept) -> Int
+    _fe_dof(fes) -> Int
+
+Number of parameters that absorbed fixed effects with `ngroups` levels hold, as fixest
+counts them by default: every level, less one reference level for each of the
+`n_intercept` fixed effects with an intercept after the first. Varying slopes
+(`fe(g)&x`) keep all their levels.
+"""
+_fe_dof(ngroups, n_intercept::Integer) = sum(ngroups; init = 0) - max(n_intercept - 1, 0)
+function _fe_dof(fes::AbstractVector{<:FixedEffect})
+    return _fe_dof((nunique(fe) for fe in fes), count(fe -> fe.interaction isa UnitWeights, fes))
 end
 
 """

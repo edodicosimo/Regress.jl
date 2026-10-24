@@ -380,8 +380,7 @@ function fit_probit(
     ################################
     ## Summary statistics
     ################################
-    ngroups_fes = [nunique(fe) for fe in fes]
-    dof_fes = sum(ngroups_fes; init = 0)
+    dof_fes = _fe_dof(fes)
     m.basis_coef = basis
     m.n_parameters = sum(basis)
     m.fixed_effects_dof = dof_fes
