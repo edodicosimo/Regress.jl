@@ -526,7 +526,7 @@ function fit_tsls(@nospecialize(df),
     iterations, converged, tss_partial = 0, true, tss_total
 
     if data_prep.has_fes
-        cols = vcat(eachcol(y), eachcol(Xexo), eachcol(Xendo), eachcol(Z))
+        cols = _fe_columns(y, Xexo, Xendo, Z)
         colnames = vcat(response_name, coefnames_exo, coefnames_endo, coefnames_iv)
 
         feM, iterations,

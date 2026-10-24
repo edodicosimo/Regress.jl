@@ -147,15 +147,14 @@ function StatsAPI.coeftable(m::AbstractRegressModel; level = 0.95)
     se = stderror(m)
     tt = t_stats(m)
     pv = p_values(m)
-    coefnms = coefnames(m)
+    coefnms = String[string(c) for c in coefnames(m)]
 
     # Compute confidence intervals using precomputed se
     scale = tdistinvcdf(dof_residual(m), 1 - (1 - level) / 2)
     conf_int = hcat(cc .- scale .* se, cc .+ scale .* se)
 
     # Put (intercept) last if present
-    if !isempty(coefnms) &&
-       ((coefnms[1] == Symbol("(Intercept)")) || (coefnms[1] == "(Intercept)"))
+    if !isempty(coefnms) && coefnms[1] == "(Intercept)"
         newindex = vcat(2:length(cc), 1)
         cc = cc[newindex]
         se = se[newindex]
@@ -165,10 +164,12 @@ function StatsAPI.coeftable(m::AbstractRegressModel; level = 0.95)
         coefnms = coefnms[newindex]
     end
 
+    levstr = isinteger(100 * level) ? string(Integer(100 * level)) : string(100 * level)
     CoefTable(
-        hcat(cc, se, tt, pv, conf_int[:, 1:2]),
-        ["Estimate", "Std. Error", "t-stat", "Pr(>|t|)", "Lower 95%", "Upper 95%"],
-        ["$(coefnms[i])" for i in 1:length(cc)], 4)
+        hcat(cc, se, tt, pv, conf_int),
+        ["Estimate", "Std. Error", "t-stat", "Pr(>|t|)",
+            "Lower $levstr%", "Upper $levstr%"],
+        coefnms, 4)
 end
 
 ##############################################################################

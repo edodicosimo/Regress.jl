@@ -174,7 +174,7 @@ function fit_kclass_estimator(
     feM = nothing
 
     if data_prep.has_fes
-        cols = vcat(eachcol(y), eachcol(Xexo), eachcol(Xendo), eachcol(Z))
+        cols = _fe_columns(y, Xexo, Xendo, Z)
         colnames = vcat(response_name, coefnames_exo, coefnames_endo, coefnames_iv)
 
         feM, iterations,
@@ -460,7 +460,9 @@ function fit_kclass_estimator(
 
     M = Adj_reordered .* residuals_raw
     meat = M' * M
-    vcov_matrix = Symmetric(scale .* invA_reordered * meat * invA_reordered)
+    default_vcov = CovarianceMatrices.HC1()
+    vcov_matrix = _wrap_vcov(Symmetric(scale .* invA_reordered * meat * invA_reordered),
+        default_vcov, nothing)
 
     # Compute standard errors
     se = sqrt.(diag(vcov_matrix))
@@ -475,9 +477,6 @@ function fit_kclass_estimator(
     F_stat_robust,
     p_val_robust = compute_robust_fstat(
         coef_full, vcov_matrix, data_prep.has_intercept, dof_residual)
-
-    # Default vcov estimator (HC1)
-    default_vcov = CovarianceMatrices.HC1()
 
     ##############################################################################
     ## Return IVEstimator

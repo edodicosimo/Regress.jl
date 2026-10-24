@@ -226,7 +226,7 @@ function ols(X::AbstractMatrix{<:Real}, y::AbstractVector{<:Real};
 
     # Absorb the fixed effects with the weights, before the √w scaling, as `ols(df, formula)`
     if has_fes
-        cols = AbstractVector{T}[y_vec, eachcol(X_mat)...]
+        cols = _fe_columns(y_vec, X_mat)
         _absorb_matrix_fes!(cols, vcat("y", names), fes,
             has_weights ? Weights(wts_vec) : uweights(n), fe_tol, fe_maxiter, T)
     end
@@ -288,7 +288,7 @@ function ols(X::AbstractMatrix{<:Real}, y::AbstractVector{<:Real};
     # Default vcov estimator (HC1)
     default_vcov = CovarianceMatrices.HC1()
 
-    return OLSMatrixEstimator{T, typeof(pp), typeof(default_vcov), typeof(vcov_matrix)}(
+    return OLSMatrixEstimator(
         rr, pp, basis_coef,
         n, dof_model, dof_res,
         T(rss), T(tss), T(r2_val), has_intercept, names, fe_groups, fe_ngroups,
@@ -532,7 +532,7 @@ function iv(estimator::AbstractIVEstimator, Z::AbstractMatrix{<:Real},
     y_tss = has_fes ? copy(y_vec) : y_vec  # the response before demeaning
 
     if has_fes
-        cols = AbstractVector{T}[y_vec, eachcol(X_mat)..., eachcol(Z_mat)...]
+        cols = _fe_columns(y_vec, X_mat, Z_mat)
         colnames = vcat("y", names, ["z$i" for i in axes(Z_mat, 2)])
         _absorb_matrix_fes!(cols, colnames, fes, uweights(n), fe_tol, fe_maxiter, T)
     end

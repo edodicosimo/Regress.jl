@@ -367,14 +367,12 @@ function _weakivtest_core(
     F_eff_val = S * pipi / tr(W_2)
     F_robust_val = S * dot(pihat, W_2_inv * pihat) / K
 
-    # Step 11: Compute bias bounds (B_TSLS, B_LIML, B_GMMf)
-    if benchmark == :nagar
-        B_TSLS = _compute_BTSLS_nagar(W_1, W_12, W_2, T(eps))
-        B_LIML = _compute_BLIML_nagar(W_1, W_12, W_2, Omega, T(eps))
-    else  # :ols
-        B_TSLS = _compute_BTSLS_ols(Omega, W_1, W_12, W_2, T(eps))
-        B_LIML = _compute_BLIML_nagar(W_1, W_12, W_2, Omega, T(eps))
-    end
+    # Step 11: Compute bias bounds (B_TSLS, B_LIML, B_GMMf). Each is assigned once: the
+    # critical-value closures below capture them, and a variable assigned in several
+    # branches would be captured as a `Core.Box`.
+    B_TSLS = benchmark == :nagar ? _compute_BTSLS_nagar(W_1, W_12, W_2, T(eps)) :
+             _compute_BTSLS_ols(Omega, W_1, W_12, W_2, T(eps))
+    B_LIML = _compute_BLIML_nagar(W_1, W_12, W_2, Omega, T(eps))
 
     # B_GMMf computation
     W_2mh = _matrix_power_sym(W_2, -0.5)
@@ -386,11 +384,9 @@ function _weakivtest_core(
     mineig = minimum(eigs_12s)
     maxeig = maximum(eigs_12s)
 
-    if benchmark == :nagar
-        B_GMMf = _compute_BGMMf_nagar(trW_1s, trW_12s, mineig, maxeig, K, bgmmf_val)
-    else
-        B_GMMf = _compute_BGMMf_ols(Omega, trW_1s, trW_12s, mineig, maxeig, K, bgmmf_val)
-    end
+    B_GMMf = benchmark == :nagar ?
+             _compute_BGMMf_nagar(trW_1s, trW_12s, mineig, maxeig, K, bgmmf_val) :
+             _compute_BGMMf_ols(Omega, trW_1s, trW_12s, mineig, maxeig, K, bgmmf_val)
 
     # Step 12: Compute critical values
     tau_x = (T(20), T(10), T(5), T(10 / 3))

@@ -1385,35 +1385,6 @@ function fe(m::IVEstimator; keepkeys = false)
     end
 end
 
-function StatsAPI.coeftable(m::IVEstimator; level = 0.95)
-    cc = coef(m)
-    se = m.se
-    tt = m.t_stats
-    pv = m.p_values
-    coefnms = coefnames(m)
-
-    # Compute confidence intervals using precomputed se
-    scale = tdistinvcdf(dof_residual(m), 1 - (1 - level) / 2)
-    conf_int = hcat(cc .- scale .* se, cc .+ scale .* se)
-
-    # put (intercept) last
-    if !isempty(coefnms) &&
-       ((coefnms[1] == Symbol("(Intercept)")) || (coefnms[1] == "(Intercept)"))
-        newindex = vcat(2:length(cc), 1)
-        cc = cc[newindex]
-        se = se[newindex]
-        tt = tt[newindex]
-        pv = pv[newindex]
-        conf_int = conf_int[newindex, :]
-        coefnms = coefnms[newindex]
-    end
-
-    CoefTable(
-        hcat(cc, se, tt, pv, conf_int[:, 1:2]),
-        ["Estimate", "Std. Error", "t-stat", "Pr(>|t|)", "Lower 95%", "Upper 95%"],
-        ["$(coefnms[i])" for i in 1:length(cc)], 4)
-end
-
 ##############################################################################
 ##
 ## IVMatrixEstimator - Matrix-based IV estimation (like OLSMatrixEstimator)
@@ -1739,6 +1710,11 @@ end
 ## first_stage for IVMatrixEstimator
 ##############################################################################
 
+# One OLS fit of each column of `Xendo` on `Z`.
+function _matrix_first_stage_fits(Z, Xendo, has_intercept, fe, coefnames)
+    return [ols(Z, Xendo[:, i]; has_intercept, fe, coefnames) for i in axes(Xendo, 2)]
+end
+
 """
     first_stage(m::IVMatrixEstimator; endogenous_names=nothing, instrument_names=nothing) -> FirstStageIV
 
@@ -1799,10 +1775,8 @@ function first_stage(m::IVMatrixEstimator{T};
     # Step 1: Run first-stage OLS regressions (xendo_j on full Z)
     # On a model with absorbed fixed effects, X and Z are already demeaned; passing the
     # groups again makes the first-stage fits count the absorbed levels.
-    fe = has_fe(m) ? Tuple(m.fe_groups) : nothing
-    fs_models = [ols(Z, Xendo[:, i]; has_intercept = m.has_intercept, fe,
-                     coefnames = fs_names)
-                 for i in 1:n_endo]
+    fs_models = _matrix_first_stage_fits(Z, Xendo, m.has_intercept,
+        has_fe(m) ? m.fe_groups : nothing, fs_names)
 
     # Step 2: Compute residualized data for F-statistics
     # Partial out exogenous regressors from excluded instruments and endogenous

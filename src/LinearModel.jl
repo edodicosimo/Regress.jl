@@ -184,6 +184,18 @@ struct OLSMatrixEstimator{T <: AbstractFloat, P <: OLSLinearPredictor{T}, V,
     p_values::Vector{T}                      # p-values
 end
 
+# The predictor type depends on the factorization chosen at run time; taking the type
+# parameters from the arguments lets a caller holding a `Union` of predictors split on it.
+function OLSMatrixEstimator(rr::OLSResponse{T}, pp::OLSLinearPredictor{T}, basis_coef,
+        nobs, dof, dof_residual, rss, tss, r2, has_intercept, coefnames, fe_groups,
+        fe_ngroups, vcov_estimator, vcov_matrix::AbstractMatrix{T}, se, t_stats,
+        p_values) where {T}
+    return OLSMatrixEstimator{T, typeof(pp), typeof(vcov_estimator), typeof(vcov_matrix)}(
+        rr, pp, basis_coef, nobs, dof, dof_residual, rss, tss, r2, has_intercept,
+        coefnames, fe_groups, fe_ngroups, vcov_estimator, vcov_matrix, se, t_stats,
+        p_values)
+end
+
 has_iv(::OLSMatrixEstimator) = false
 has_fe(m::OLSMatrixEstimator) = !isempty(m.fe_groups)
 dof_fes(m::OLSMatrixEstimator) = sum(m.fe_ngroups; init = 0)
@@ -223,7 +235,7 @@ end
 
 # Group codes and number of levels of each fixed effect, as `_cluster_dof` reads them.
 function _matrix_fe_groups(fes)
-    return [Vector{Int}(fe.refs) for fe in fes], Int[nunique(fe) for fe in fes]
+    return Vector{Int}[Vector{Int}(fe.refs) for fe in fes], Int[nunique(fe) for fe in fes]
 end
 
 # Demean `cols` in place on `fes` with the solver of `ols(df, formula)`, which also zeroes
@@ -519,35 +531,6 @@ function fe(m::OLSEstimator; keepkeys = false)
     else
         m.fes.fe[!, (length(m.fes.fe_names) + 1):end]
     end
-end
-
-function StatsAPI.coeftable(m::OLSEstimator; level = 0.95)
-    cc = coef(m)
-    se = stderror(m)
-    tt = t_stats(m)
-    pv = p_values(m)
-    coefnms = coefnames(m)
-
-    # Compute confidence intervals using precomputed se
-    scale = tdistinvcdf(dof_residual(m), 1 - (1 - level) / 2)
-    conf_int = hcat(cc .- scale .* se, cc .+ scale .* se)
-
-    # put (intercept) last
-    if !isempty(coefnms) &&
-       ((coefnms[1] == Symbol("(Intercept)")) || (coefnms[1] == "(Intercept)"))
-        newindex = vcat(2:length(cc), 1)
-        cc = cc[newindex]
-        se = se[newindex]
-        tt = tt[newindex]
-        pv = pv[newindex]
-        conf_int = conf_int[newindex, :]
-        coefnms = coefnms[newindex]
-    end
-
-    CoefTable(
-        hcat(cc, se, tt, pv, conf_int[:, 1:2]),
-        ["Estimate", "Std. Error", "t-stat", "Pr(>|t|)", "Lower 95%", "Upper 95%"],
-        ["$(coefnms[i])" for i in 1:length(cc)], 4)
 end
 
 ##############################################################################

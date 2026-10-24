@@ -480,11 +480,27 @@ function solve_fixed_effects!(residuals::AbstractVector,
 end
 
 """
-    partial_out_fixed_effects!(cols, colnames, subfes, wts, method, nthreads,
-                                tol, maxiter, progress_bar, save_fes, has_intercept, has_fe_intercept)
+    _fe_columns(y, Xs...) -> Vector{<:SubArray}
 
-Partial out fixed effects from a collection of columns (y and X matrices).
-This is the common FE demeaning logic shared by both fit_ols and fit_tsls.
+The vector `y` followed by the columns of each matrix in `Xs`, as views whose parent is a
+`Matrix{T}`. Every element has the same concrete type, and demeaning an element in place
+writes through to `y` or to the matrix it views.
+"""
+function _fe_columns(y::Vector{T}, Xs::Matrix{T}...) where {T}
+    cols = [view(reshape(y, :, 1), :, 1)]
+    for X in Xs
+        append!(cols, eachcol(X))
+    end
+    return cols
+end
+
+"""
+    partial_out_fixed_effects!(cols, colnames, subfes, wts, method, nthreads,
+                                tol, maxiter, progress_bar, save_fes, has_intercept,
+                                has_fe_intercept, T; verbose = true)
+
+Partial out fixed effects in place from `cols`, the response followed by the regressors
+(see [`_fe_columns`](@ref)). This is the FE demeaning shared by the OLS and IV fits.
 
 Returns:
 - feM: Fixed effect solver object (or nothing if no FEs)
@@ -493,7 +509,7 @@ Returns:
 - tss_partial: TSS after partialing out FEs
 - oldy, oldX: Copies of y and X before demeaning (for FE estimation, if save_fes=true)
 """
-function partial_out_fixed_effects!(cols::Vector,
+function partial_out_fixed_effects!(cols::Vector{<:AbstractVector{T}},
         colnames::Vector,
         subfes::Vector{<:FixedEffect},
         wts::AbstractWeights,
@@ -505,71 +521,48 @@ function partial_out_fixed_effects!(cols::Vector,
         save_fes::Bool,
         has_intercept::Bool,
         has_fe_intercept::Bool,
-        T::Type;
-        verbose::Bool = true)
+        ::Type{T};
+        verbose::Bool = true) where {T}
+    oldy = save_fes && !isempty(subfes) ? copy(cols[1]) : nothing
+    oldX = save_fes && !isempty(subfes) && length(cols) > 1 ?
+           reduce(hcat, @view cols[2:end]) : nothing
 
-    # Initialize return values
-    iterations, converged = 0, true
-    oldy, oldX = nothing, nothing
-    feM = nothing
-
-    if !isempty(subfes)
-        # Save copies if needed for FE estimation
-        # Use copy() instead of deepcopy() - vectors don't need deep copy
-        if save_fes
-            oldy = copy(cols[1])
-            if length(cols) > 1
-                # Pre-allocate and copy directly instead of reduce(hcat, copy.(...))
-                # which repeatedly allocates and copies during concatenation
-                n = length(cols[1])
-                k = length(cols) - 1
-                oldX = Matrix{T}(undef, n, k)
-                @inbounds for j in 1:k
-                    copyto!(view(oldX, :, j), cols[j + 1])
-                end
-            end
-        end
-
-        # Store pre-demeaning sum of squares for collinearity detection
-        sumsquares_pre = [sum(abs2, x) for x in cols]
-
-        # Create FE solver
-        feM = AbstractFixedEffectSolver{T}(subfes, wts, Val{method})
-
-        # Partial out fixed effects
-        _, iterations,
-        convergeds = solve_residuals!(cols, feM;
-            maxiter = maxiter,
-            tol = tol,
-            progress_bar = progress_bar)
-
-        # Check for collinearity with FEs
-        for i in 1:length(cols)
-            if sum(abs2, cols[i]) < tol * sumsquares_pre[i]
-                if i == 1
-                    verbose &&
-                        @info "Dependent variable $(colnames[1]) is probably perfectly explained by fixed effects."
-                else
-                    verbose &&
-                        @info "RHS-variable $(colnames[i]) is collinear with the fixed effects."
-                    cols[i] .= zero(T)
-                end
-            end
-        end
-
-        iterations = maximum(iterations)
-        converged = all(convergeds)
-        if !converged
-            verbose &&
-                @info "Convergence not achieved in $(iterations) iterations; try increasing maxiter or decreasing tol."
-        end
-
-        # Compute TSS after partialing out
+    if isempty(subfes)
         tss_partial = tss(cols[1], has_intercept | has_fe_intercept, wts)
-    else
-        tss_partial = tss(cols[1], has_intercept | has_fe_intercept, wts)
+        return nothing, 0, true, tss_partial, oldy, oldX
     end
 
+    # Pre-demeaning sums of squares, for detecting columns the fixed effects explain
+    sumsquares_pre = T[sum(abs2, x) for x in cols]
+
+    feM = AbstractFixedEffectSolver{T}(subfes, wts, Val{method})
+    _, iterations_by_col,
+    convergeds = solve_residuals!(cols, feM;
+        maxiter = maxiter,
+        tol = tol,
+        progress_bar = progress_bar)
+
+    for i in eachindex(cols, sumsquares_pre)
+        if sum(abs2, cols[i]) < tol * sumsquares_pre[i]
+            if i == firstindex(cols)
+                verbose &&
+                    @info "Dependent variable $(colnames[1]) is probably perfectly explained by fixed effects."
+            else
+                verbose &&
+                    @info "RHS-variable $(colnames[i]) is collinear with the fixed effects."
+                cols[i] .= zero(T)
+            end
+        end
+    end
+
+    iterations = maximum(iterations_by_col)
+    converged = all(convergeds)
+    if !converged
+        verbose &&
+            @info "Convergence not achieved in $(iterations) iterations; try increasing maxiter or decreasing tol."
+    end
+
+    tss_partial = tss(cols[1], has_intercept | has_fe_intercept, wts)
     return feM, iterations, converged, tss_partial, oldy, oldX
 end
 
