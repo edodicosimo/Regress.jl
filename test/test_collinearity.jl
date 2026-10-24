@@ -81,3 +81,30 @@ end
     @test isnan(stderror(m)[4]) && isnan(stderror(m)[6])
     @test sum(Regress.ols(X, y; collinearity = :qr).basis_coef) == 4
 end
+
+@testitem "leverage-based variances with collinear columns" tags = [:ols, :vcov] begin
+    using Regress, DataFrames, StableRNGs, StatsBase
+    using CovarianceMatrices
+
+    rng = StableRNG(6)
+    n = 200
+    df = DataFrame(x1 = randn(rng, n), x2 = randn(rng, n), g = rand(rng, 1:20, n))
+    df.x3 = df.x1 .+ df.x2
+    df.y = df.x1 .+ randn(rng, n)
+    X = [ones(n) df.x1 df.x2 df.x3]
+
+    # The leverage covers the estimable columns, for every factorization and both paths.
+    for fac in (:chol, :qr, :sweep)
+        mf = Regress.ols(df, @formula(y ~ x1 + x2 + x3); factorization = fac)
+        mm = Regress.ols(X, df.y; factorization = fac)
+        for m in (mf, mm), K in (HC2(), HC3())
+
+            se = stderror(K, m)
+            @test se[1:3] ≈ stderror(K, Regress.ols(X[:, 1:3], df.y)) rtol = 1e-10
+            @test isnan(se[4])
+        end
+        @test stderror(CR2(df.g), mm)[1:3] ≈
+              stderror(CR2(df.g), Regress.ols(X[:, 1:3], df.y)) rtol = 1e-10
+        @test leverage(mm) ≈ leverage(Regress.ols(X[:, 1:3], df.y)) rtol = 1e-10
+    end
+end

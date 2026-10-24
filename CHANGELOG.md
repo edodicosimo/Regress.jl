@@ -273,6 +273,11 @@
   out of the projection. The leverage is now `diag(X (X̂'X̂)⁻¹ X̂')`, which equals
   the AER formula `diag(X (X̂'X̂)⁻¹ X' P_Z)` for any instruments, and the results
   match the fit with the instrument dummies written out.
+- **HC2–HC5, CR2 and CR3 threw on OLS models with collinear columns** fitted
+  with `factorization = :chol` or `:qr`: the leverage paired the full model
+  matrix with the factor of the estimable columns. All factorizations now use
+  the estimable columns, and the leverage is a product with the inverse factor
+  rather than a triangular solve over every row (about three times faster).
 - **IV standard errors followed the wrong coefficients after recategorization.**
   When an endogenous regressor that the instruments explain was moved ahead of
   another endogenous regressor, the coefficients were reported in formula order
