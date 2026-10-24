@@ -7,7 +7,9 @@ using Pkg: PackageSpec
 const PKG_NAME = "Regress"
 const REPO_ROOT = abspath(joinpath(@__DIR__, ".."))
 const BENCH_SCRIPT = joinpath(@__DIR__, "benchmarks.jl")
-const BENCH_PROJECT = joinpath(@__DIR__, "Project.toml")
+# The packages benchmarks.jl loads besides Regress and BenchmarkTools, as in the
+# `extra-pkgs` of .github/workflows/benchmark.yml.
+const EXTRA_PKGS = ["CovarianceMatrices", "DataFrames", "StableRNGs"]
 
 const OUTPUT_DIR = abspath(get(ENV, "ASV_OUTPUT_DIR", joinpath(@__DIR__, "results")))
 const BASELINE_REV = get(ENV, "ASV_BASELINE", "HEAD")
@@ -30,7 +32,7 @@ results = AirspeedVelocity.benchmark(
     specs;
     output_dir = OUTPUT_DIR,
     script = BENCH_SCRIPT,
-    project_toml = BENCH_PROJECT,
+    extra_pkgs = EXTRA_PKGS,
     tune = TUNE_BENCH,
     nsamples_load_time = NSAMPLES_LOAD_TIME
 )

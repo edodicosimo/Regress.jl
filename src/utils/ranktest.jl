@@ -297,7 +297,7 @@ function _compute_first_stage_fstats_via_ols(
             rr, pp, basis,
             n, dof_fs, dof_residual_fs,
             T(rss_j), T(tss_j), T(1 - rss_j / tss_j), true,
-            _matrix_coefnames(nothing, k_total), Vector{Int}[], Int[],
+            _matrix_coefnames(nothing, k_total), Vector{Int}[], Int[], trues(n),
             vcov_type, vcov_placeholder,
             Vector{T}(undef, k_total), Vector{T}(undef, k_total), Vector{T}(undef, k_total)
         )

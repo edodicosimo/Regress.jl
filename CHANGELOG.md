@@ -4,6 +4,53 @@
 
 ### Breaking Changes
 
+- **Formula and matrix fits share one estimation path.** `ols(df, formula)` and
+  `ols(X, y)` run the same code, as do `iv(estimator, df, formula)` and
+  `iv(estimator, Z, X, y)`, so the same data and settings give identical
+  coefficients, standard errors, degrees of freedom and R². Several defaults
+  changed to make this possible:
+  - `factorization = :auto` means Cholesky for fewer than 100 coefficients and
+    QR otherwise in both paths (the formula default was the sweep operator).
+  - `collinearity = :sweep` is the default in both paths: a column that the
+    earlier ones explain is dropped, in formula order, as fixest and Stata do.
+    The matrix default was QR with column pivoting, which keeps the columns of
+    largest norm and so could drop an earlier column. `collinearity = :qr`
+    remains available.
+  - The fixed-effect demeaning tolerance is `1e-8` (formula default `1e-6`).
+    The formula keywords `tol` and `maxiter` are renamed `fe_tol` and
+    `fe_maxiter`, as in the matrix fits; the old names still work with a
+    deprecation warning. The collinearity tolerance of `ols(X, y)`, formerly
+    `tol`, is `collinearity_tol` (also deprecated with a warning), and the
+    formula fit accepts it too.
+- **Matrix fits drop fixed-effect singletons** (`drop_singletons = true`), by
+  the recursive rule of the formula fits and of fixest's default
+  `fixef.rm = "perfect_fit"`. Coefficients do not change; `nobs`,
+  `dof_residual` and the standard errors do. Rows with zero weight are dropped
+  too. The models store the rows used in a new `esample` field.
+- **Failure of the fixed-effect demeaning to converge throws** in the formula
+  fits, as it already did in the matrix fits, instead of logging `@info`.
+- **Negative or non-finite weights throw** in both paths; the formula fits
+  dropped them silently.
+- **Fixed effects hold one parameter fewer per fixed effect after the first**, as
+  fixest counts them (`ΣG − (Q − 1)` for `Q` fixed effects with intercepts;
+  varying slopes keep all their levels). This enters `dof_residual`, and so the
+  HC1 standard errors, t statistics and first-stage F statistics of every model
+  with two or more fixed effects, in both paths and in `probit`. The
+  cluster-robust correction already counted them this way. Regress now matches
+  fixest 0.14.1 on HC1 and on the first-stage F of two-way fixed-effect models.
+- **`dof(model)` of an IV model counts every estimated coefficient**, the
+  intercept included, as OLS models do.
+- **Matrix IV fits handle collinearity as the formula fits do** instead of
+  throwing: a repeated instrument or regressor is dropped, and an endogenous
+  regressor that the instruments explain becomes exogenous. Matrix TSLS
+  projects on `[Xexo, Z]`; when `Z` does not lead with the exogenous columns of
+  `X`, all of `Z` are excluded instruments.
+- **`PostEstimationDataIVMatrix`** has `endo_cols` (the endogenous columns of
+  `X`) in place of `n_endogenous`, and a `weights` field. Its matrices hold the
+  estimated columns only, in the order of the columns of `X`.
+- **LIML, Fuller and k-class formula fits store their variance as a
+  `CovarianceMatrix`**, as TSLS fits do.
+
 - **Requires CovarianceMatrices 0.33.1.** Regress uses its public extension
   functions for packages that form their own moment matrices, and its
   `DriscollKraay` estimators that name their indices by column, which earlier
@@ -134,6 +181,15 @@
 
 ### New Features
 
+- **Matrix fits gain the formula fits' options.** `iv(estimator, Z, X, y)`
+  accepts `weights`; `ols(X, y)` and `iv` accept `drop_singletons` and
+  `dof_add`; `ols(X, y)` accepts `factorization = :sweep`.
+- **Per-observation vectors for matrix models may cover every input row.**
+  Cluster identifiers and Driscoll-Kraay indices passed to `vcov` on an
+  `OLSMatrixEstimator` or `IVMatrixEstimator` may have one entry per row of the
+  input or one per observation; the first are restricted to the estimation
+  sample. `esample(model, v)` works on matrix models.
+
 - **`lags()` formula term**: `@formula(y ~ lags(x, 12))` expands into a matrix of 12 lag columns. Supports nested transforms (`lags(log(abs(x)), 3)`), interactions (`lags(x, 3) & z`), and composition with other terms. Moved from LocalProjections.jl so both packages share the same implementation.
 
 - **`first_stage_F_iid(m)`**, **`first_stage_F_robust(m)`**, **`first_stage_F_KP(m)`**: New first-stage diagnostic API returning `FirstStageFTest{T, K}` — parametric on value type (`Float64` or `Vector{Float64}`) and variance estimator type. Replaces the ambiguous `first_stage(m)` / `first_stage_f(m)` functions.
@@ -211,6 +267,32 @@
   so `stderror`, `vcov` and `coeftable` are not available for it.
 
 ### Bug Fixes
+
+- **HC2–HC5, CR2 and CR3 on TSLS models with fixed effects as instruments**
+  (`(x ~ fe(g)&fe(t))`) used a leverage that left the instrument fixed effects
+  out of the projection. The leverage is now `diag(X (X̂'X̂)⁻¹ X̂')`, which equals
+  the AER formula `diag(X (X̂'X̂)⁻¹ X' P_Z)` for any instruments, and the results
+  match the fit with the instrument dummies written out.
+- **HC2–HC5, CR2 and CR3 threw on OLS models with collinear columns** fitted
+  with `factorization = :chol` or `:qr`: the leverage paired the full model
+  matrix with the factor of the estimable columns. All factorizations now use
+  the estimable columns, and the leverage is a product with the inverse factor
+  rather than a triangular solve over every row (about three times faster).
+- **IV standard errors followed the wrong coefficients after recategorization.**
+  When an endogenous regressor that the instruments explain was moved ahead of
+  another endogenous regressor, the coefficients were reported in formula order
+  but the variance in the internal order, so `stderror`, t statistics, p-values
+  and post-estimation `vcov` swapped between the two.
+- **`collinearity = :sweep` kept collinear columns.** The sweep wrote zeros
+  over the pivot row and read a stale triangle, and its tolerance compared each
+  pivot with itself; on `[1 NDI Price 2Price]` it kept all four columns and the
+  Cholesky solve failed.
+- **Weighted R² of `ols(X, y)`** centered the √w-scaled response on its
+  unweighted mean; it now uses Σw(y − ȳ_w)², as the formula fit does.
+- **`coeftable(model; level)`** labelled the interval columns "95%" for every
+  `level`.
+- **`weakivtest` and saved fixed effects of IV models with dropped columns**
+  multiplied the reduced regressor matrix by the full coefficient vector.
 
 - The matrix `iv(TSLS(), Z, X, y)` throws an `ArgumentError` for a rank-deficient
   `Z` or `X̂ = P_Z X` on every platform. Rank is decided by pivoted QR with the
@@ -390,6 +472,12 @@
 - **Fallback path in `compute_per_endogenous_fstats`**: The fallback when `Xendo_orig` is `nothing` passed `Z_res` as the full design matrix, producing wrong F-statistics. Replaced with an explicit error.
 
 ### Refactoring
+
+- **IV leverage costs O(n·k)** instead of O(n²) (HC2–HC5, CR2, CR3 on TSLS
+  models); the formula path looped over all pairs of observations and the
+  matrix path formed the n×n projection.
+- **Formula fits reach their estimation code through a function barrier**, so
+  the numerical work compiles for the concrete precision.
 
 - **Residual adjustments delegate to CovarianceMatrices.jl**: the HC0 and HC2-HC5
   adjustments now come from `CovarianceMatrices.residual_adjustment` instead of

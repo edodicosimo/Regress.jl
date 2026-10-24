@@ -22,3 +22,8 @@ jobs:
         with:
           julia-version: '1'
           tune: 'false'
+          # The pull request's own script, run on both revisions, with the packages it
+          # loads besides Regress and BenchmarkTools (which AirspeedVelocity adds).
+          # benchmark/run_asv.jl uses the same list.
+          script: benchmark/benchmarks.jl
+          extra-pkgs: CovarianceMatrices,DataFrames,StableRNGs

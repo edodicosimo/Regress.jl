@@ -97,6 +97,18 @@ struct OLSEstimator{T <: AbstractFloat, P <: OLSLinearPredictor{T}, V,
     p::T                            # P-value of F-stat
 end
 
+# See the `OLSMatrixEstimator` outer constructor.
+function OLSEstimator(rr::OLSResponse{T}, pp::OLSLinearPredictor{T}, fes, formula,
+        formula_schema, contrasts, esample, coefnames, basis_coef, nobs, dof, dof_fes,
+        dof_residual, tss_total, tss_partial, rss, r2, r2_within, has_intercept,
+        vcov_estimator, vcov_matrix::AbstractMatrix{T}, se, t_stats, p_values, F,
+        p) where {T}
+    return OLSEstimator{T, typeof(pp), typeof(vcov_estimator), typeof(vcov_matrix)}(
+        rr, pp, fes, formula, formula_schema, contrasts, esample, coefnames, basis_coef,
+        nobs, dof, dof_fes, dof_residual, tss_total, tss_partial, rss, r2, r2_within,
+        has_intercept, vcov_estimator, vcov_matrix, se, t_stats, p_values, F, p)
+end
+
 has_iv(::OLSEstimator) = false
 has_fe(m::OLSEstimator) = has_fe(m.formula)
 dof_fes(m::OLSEstimator) = m.dof_fes
@@ -137,6 +149,8 @@ Use `ols(X, y)` to fit this model type.
 - `fe_groups::Vector{Vector{Int}}`: Group codes of each absorbed fixed effect (empty
   without fixed effects)
 - `fe_ngroups::Vector{Int}`: Number of levels of each absorbed fixed effect
+- `esample::BitVector`: Which rows of `X` and `y` are in the estimation sample (rows with
+  zero weight and fixed-effect singletons are not)
 - `vcov_estimator::V`: Variance-covariance estimator used to compute `vcov_matrix`
 - `vcov_matrix::C`: Precomputed variance-covariance matrix
 - `se::Vector{T}`: Standard errors
@@ -175,6 +189,7 @@ struct OLSMatrixEstimator{T <: AbstractFloat, P <: OLSLinearPredictor{T}, V,
     coefnames::Vector{String}       # One name per column of X
     fe_groups::Vector{Vector{Int}}  # Group codes of each absorbed fixed effect
     fe_ngroups::Vector{Int}         # Number of levels of each absorbed fixed effect
+    esample::BitVector              # Rows of the input in the estimation sample
 
     # Variance-covariance estimator and precomputed statistics
     vcov_estimator::V                        # Estimator used to compute vcov_matrix
@@ -184,9 +199,21 @@ struct OLSMatrixEstimator{T <: AbstractFloat, P <: OLSLinearPredictor{T}, V,
     p_values::Vector{T}                      # p-values
 end
 
+# The predictor type depends on the factorization chosen at run time; taking the type
+# parameters from the arguments lets a caller holding a `Union` of predictors split on it.
+function OLSMatrixEstimator(rr::OLSResponse{T}, pp::OLSLinearPredictor{T}, basis_coef,
+        nobs, dof, dof_residual, rss, tss, r2, has_intercept, coefnames, fe_groups,
+        fe_ngroups, esample, vcov_estimator, vcov_matrix::AbstractMatrix{T}, se, t_stats,
+        p_values) where {T}
+    return OLSMatrixEstimator{T, typeof(pp), typeof(vcov_estimator), typeof(vcov_matrix)}(
+        rr, pp, basis_coef, nobs, dof, dof_residual, rss, tss, r2, has_intercept,
+        coefnames, fe_groups, fe_ngroups, esample, vcov_estimator, vcov_matrix, se,
+        t_stats, p_values)
+end
+
 has_iv(::OLSMatrixEstimator) = false
 has_fe(m::OLSMatrixEstimator) = !isempty(m.fe_groups)
-dof_fes(m::OLSMatrixEstimator) = sum(m.fe_ngroups; init = 0)
+dof_fes(m::OLSMatrixEstimator) = _fe_dof(m.fe_ngroups, length(m.fe_ngroups))
 model_hasintercept(m::OLSMatrixEstimator) = m.has_intercept
 
 # Names of a matrix fit's coefficients: the `coefnames` keyword, or `x1, ..., xk`.
@@ -221,21 +248,33 @@ function _matrix_fixedeffects(fe, n::Integer, has_intercept::Bool)
     return fes
 end
 
-# Group codes and number of levels of each fixed effect, as `_cluster_dof` reads them.
-function _matrix_fe_groups(fes)
-    return [Vector{Int}(fe.refs) for fe in fes], Int[nunique(fe) for fe in fes]
+# The estimation sample (a `BitVector` over the n input rows), the fixed effects on it and
+# the weights on it of a matrix fit. Rows with zero weight are dropped, then, when
+# `drop_singletons`, fixed-effect singletons, by the rule `prepare_data` applies.
+function _matrix_sample(n::Integer, fe, weights, has_intercept::Bool,
+        drop_singletons::Bool, ::Type{T}) where {T}
+    fes = _matrix_fixedeffects(fe, n, has_intercept)
+    esample = trues(n)
+    if weights !== nothing
+        Base.require_one_based_indexing(weights)
+        length(weights) == n ||
+            throw(DimensionMismatch("weights has $(length(weights)) elements but y has $n"))
+        _check_weights(weights, "`weights`")
+        esample .&= weights .> 0
+    end
+    if drop_singletons && !isempty(fes)
+        drop_singletons!(esample, fes, Threads.nthreads())
+    end
+    nobs = count(esample)
+    nobs > 0 || throw(ArgumentError("sample is empty"))
+    all(esample) || (fes = FixedEffect[fe[esample] for fe in fes])
+    wts = weights === nothing ? uweights(nobs) : Weights(Vector{T}(weights[esample]))
+    return esample, fes, wts
 end
 
-# Demean `cols` in place on `fes` with the solver of `ols(df, formula)`, which also zeroes
-# the columns the fixed effects explain.
-function _absorb_matrix_fes!(cols, colnames, fes, wts, tol, maxiter, ::Type{T}) where {T}
-    _, iterations, converged, _, _, _ = partial_out_fixed_effects!(
-        cols, colnames, fes, wts, :cpu, Threads.nthreads(), tol, maxiter, false,
-        false, false, true, T)
-    converged || throw(ErrorException(
-        "demeaning on the fixed effects did not converge in $iterations iterations; " *
-        "increase fe_maxiter or fe_tol"))
-    return cols
+# Group codes and number of levels of each fixed effect, as `_cluster_dof` reads them.
+function _matrix_fe_groups(fes)
+    return Vector{Int}[Vector{Int}(fe.refs) for fe in fes], Int[nunique(fe) for fe in fes]
 end
 
 """
@@ -333,7 +372,7 @@ function Base.:+(m::OLSMatrixEstimator{T, P, V1}, v::VcovSpec{V2}) where {T, P, 
         m.rr, m.pp, m.basis_coef,
         m.nobs, m.dof, m.dof_residual,
         m.rss, m.tss, m.r2, m.has_intercept, m.coefnames, m.fe_groups, m.fe_ngroups,
-        v.source, vcov_mat, se, t_stats, p_values
+        m.esample, v.source, vcov_mat, se, t_stats, p_values
     )
 end
 
@@ -519,35 +558,6 @@ function fe(m::OLSEstimator; keepkeys = false)
     else
         m.fes.fe[!, (length(m.fes.fe_names) + 1):end]
     end
-end
-
-function StatsAPI.coeftable(m::OLSEstimator; level = 0.95)
-    cc = coef(m)
-    se = stderror(m)
-    tt = t_stats(m)
-    pv = p_values(m)
-    coefnms = coefnames(m)
-
-    # Compute confidence intervals using precomputed se
-    scale = tdistinvcdf(dof_residual(m), 1 - (1 - level) / 2)
-    conf_int = hcat(cc .- scale .* se, cc .+ scale .* se)
-
-    # put (intercept) last
-    if !isempty(coefnms) &&
-       ((coefnms[1] == Symbol("(Intercept)")) || (coefnms[1] == "(Intercept)"))
-        newindex = vcat(2:length(cc), 1)
-        cc = cc[newindex]
-        se = se[newindex]
-        tt = tt[newindex]
-        pv = pv[newindex]
-        conf_int = conf_int[newindex, :]
-        coefnms = coefnms[newindex]
-    end
-
-    CoefTable(
-        hcat(cc, se, tt, pv, conf_int[:, 1:2]),
-        ["Estimate", "Std. Error", "t-stat", "Pr(>|t|)", "Lower 95%", "Upper 95%"],
-        ["$(coefnms[i])" for i in 1:length(cc)], 4)
 end
 
 ##############################################################################

@@ -18,17 +18,30 @@
         @test_throws ArgumentError vcov(CR1(:State), m)
         @test_throws "Cluster variable :State not found in model" vcov(CR1(:State), m)
     end
+end
 
-    # Singular matrices in the matrix IV fit
+@testitem "matrix IV drops collinear columns as the formula fit does" tags = [:iv, :matrix] begin
+    using Regress, DataFrames, CSV, StatsBase
+
+    df = DataFrame(CSV.File(joinpath(dirname(pathof(Regress)), "../dataset/Cigar.csv")))
     n = nrow(df)
+
+    # A repeated instrument is dropped.
     X = hcat(ones(n), df.NDI)
-    Zdup = hcat(ones(n), df.Pimin, df.Pimin)
-    @test_throws ArgumentError Regress.iv(Regress.TSLS(), Zdup, X, df.Sales)
-    @test_throws "Instrument matrix Z is rank deficient" Regress.iv(Regress.TSLS(), Zdup, X, df.Sales)
-    Xdup = hcat(ones(n), df.NDI, df.NDI)
+    m_dup = Regress.iv(Regress.TSLS(), hcat(ones(n), df.Pimin, df.Pimin), X, df.Sales)
+    m_one = Regress.iv(Regress.TSLS(), hcat(ones(n), df.Pimin), X, df.Sales)
+    @test coef(m_dup) == coef(m_one)
+    @test stderror(m_dup) == stderror(m_one)
+
+    # An endogenous regressor that repeats an exogenous one (exactly or to 1e-12) becomes
+    # exogenous and is dropped as collinear; the fit is then OLS on the other columns.
     Z = hcat(ones(n), df.Pimin, df.Pop)
-    @test_throws ArgumentError Regress.iv(Regress.TSLS(), Z, Xdup, df.Sales)
-    @test_throws "X̂'X is singular" Regress.iv(Regress.TSLS(), Z, Xdup, df.Sales)
-    Xnear = hcat(ones(n), df.NDI, df.NDI .* (1 .+ 1e-12 .* sin.(1:n)))
-    @test_throws "X̂'X is singular" Regress.iv(Regress.TSLS(), Z, Xnear, df.Sales)
+    m_ols = Regress.ols(X, df.Sales)
+    for Xdup in (hcat(X, df.NDI), hcat(X, df.NDI .* (1 .+ 1e-12 .* sin.(1:n))))
+        m = Regress.iv(Regress.TSLS(), Z, Xdup, df.Sales)
+        @test coef(m)[1:2] ≈ coef(m_ols) rtol = 1e-10
+        @test stderror(m)[1:2] ≈ stderror(m_ols) rtol = 1e-10
+        @test coef(m)[3] == 0 && isnan(stderror(m)[3])
+        @test dof_residual(m) == dof_residual(m_ols)
+    end
 end

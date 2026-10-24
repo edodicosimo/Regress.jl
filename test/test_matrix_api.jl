@@ -202,7 +202,7 @@ end
     y = x .- 0.5 .* w .+ randn(rng, G)[id] .+ randn(rng, n)
     wt = 0.5 .+ rand(rng, n)
     df = DataFrame(; y, x, w, z, id, t, pair, wt)
-    opts = (; tol = 1e-12, drop_singletons = false, save_cluster = [:id, :pair, :t])
+    opts = (; fe_tol = 1e-12, drop_singletons = false, save_cluster = [:id, :pair, :t])
     xcopy = copy(x)
 
     # OLS, one fixed effect: coefficients, HC1, R², and CR1 with the fixed effect
@@ -293,7 +293,7 @@ end
         @test weakivtest(mm).F_eff ≈ weakivtest(mf).F_eff
 
         # Absorbed fixed effects
-        opts = (; tol = 1e-12, drop_singletons = false, save_cluster = [:t])
+        opts = (; fe_tol = 1e-12, drop_singletons = false, save_cluster = [:t])
         mfe = fit(() -> Regress.iv(est, df, @formula(y ~ w + (x ~ z1 + z2) + fe(id));
             opts...))
         mme = fit(() -> Regress.iv(est, [w z1 z2], [w x], y; fe = id))
@@ -312,4 +312,158 @@ end
     # The k-class fits need the exogenous columns first in both Z and X
     @test_throws "LIML needs Z = [Xexo, Zinstr] and X = [Xexo, Xendo] with the same first 2" Regress.iv(
         LIML(), [w ones(n) z1], [ones(n) w x], y)
+end
+
+@testitem "matrix and formula OLS give identical fits" tags = [:ols, :matrix, :fe] begin
+    using Regress, DataFrames, StableRNGs, StatsBase
+    using CovarianceMatrices
+    using Regress: fe
+
+    rng = StableRNG(11)
+    n = 400
+    df = DataFrame(x1 = randn(rng, n), x2 = randn(rng, n), g = rand(rng, 1:40, n),
+        h = rand(rng, 1:15, n), w = 0.2 .+ rand(rng, n))
+    df.g[1] = 999      # a singleton group
+    df.w[5] = 0.0      # a zero weight
+    df.y = 1 .+ df.x1 .- 0.5 .* df.x2 .+ 0.1 .* df.g .+ randn(rng, n)
+    df.x3 = df.x1 .+ df.x2
+    X = [ones(n) df.x1 df.x2]
+    Xs = [df.x1 df.x2]
+
+    function same(mf, mm)
+        @test isequal(coef(mf), coef(mm))
+        @test isequal(stderror(mf), stderror(mm))
+        @test nobs(mf) == nobs(mm)
+        @test dof_residual(mf) == dof_residual(mm)
+        @test r2(mf) == r2(mm)
+    end
+
+    f = @formula(y ~ x1 + x2)
+    same(Regress.ols(df, f), Regress.ols(X, df.y))
+    same(Regress.ols(df, f; weights = :w), Regress.ols(X, df.y; weights = df.w))
+    same(Regress.ols(df, f; dof_add = 3), Regress.ols(X, df.y; dof_add = 3))
+    for fac in (:chol, :qr, :sweep)
+        same(Regress.ols(df, f; factorization = fac),
+            Regress.ols(X, df.y; factorization = fac))
+    end
+    same(Regress.ols(df, @formula(y ~ x1 + x2 + x3)), Regress.ols([X df.x3], df.y))
+    same(Regress.ols(df, @formula(y ~ x1 + x2 + fe(g)); progress_bar = false),
+        Regress.ols(Xs, df.y; fe = df.g))
+    same(
+        Regress.ols(df, @formula(y ~ x1 + x2 + fe(g)); drop_singletons = false,
+            progress_bar = false),
+        Regress.ols(Xs, df.y; fe = df.g, drop_singletons = false))
+    same(
+        Regress.ols(df, @formula(y ~ x1 + x2 + fe(g) + fe(h)); weights = :w,
+            progress_bar = false),
+        Regress.ols(Xs, df.y; fe = (df.g, df.h), weights = df.w))
+
+    # The singleton and the zero-weight row leave the estimation sample.
+    mm = Regress.ols(Xs, df.y; fe = df.g, weights = df.w)
+    @test nobs(mm) == n - 2
+    @test !mm.esample[1] && !mm.esample[5] && count(mm.esample) == n - 2
+    @test Regress.esample(mm, df.h) == df.h[mm.esample]
+
+    # Weighted R² centers on the weighted mean.
+    mw = Regress.ols(X, df.y; weights = df.w)
+    β = (X' * (df.w .* X)) \ (X' * (df.w .* df.y))
+    ybar = sum(df.w .* df.y) / sum(df.w)
+    @test r2(mw) ≈ 1 - sum(df.w .* (df.y .- X * β) .^ 2) /
+                       sum(df.w .* (df.y .- ybar) .^ 2) rtol = 1e-10
+
+    # Cluster identifiers may cover every input row or only the estimation sample.
+    mf = Regress.ols(df, @formula(y ~ x1 + x2 + fe(g)); save_cluster = :h,
+        progress_bar = false)
+    mm = Regress.ols(Xs, df.y; fe = df.g)
+    @test stderror(CR1(df.h), mm) == stderror(CR1(df.h[mm.esample]), mm)
+    @test stderror(CR1(df.h), mm) ≈ stderror(CR1(:h), mf) rtol = 1e-12
+    @test_throws "the cluster variable has 10 observations; the model was fitted on $n rows, of which $(n - 1)" stderror(
+        CR1(df.h[1:10]), mm)
+
+    @test_throws "weights must be finite and nonnegative" Regress.ols(
+        X, df.y; weights = -df.w)
+    @test_throws "weights must be finite and nonnegative" Regress.ols(
+        df, f; weights = :x1)
+    @test_throws "pass `collinearity_tol` only" Regress.ols(
+        X, df.y; tol = 1e-8, collinearity_tol = 1e-8)
+    @test_throws "pass `fe_tol` only" Regress.ols(df, f; tol = 1e-8, fe_tol = 1e-8)
+end
+
+@testitem "matrix and formula IV give identical fits" tags = [:iv, :kclass, :matrix, :fe] begin
+    using Regress, DataFrames, StableRNGs, StatsBase
+    using CovarianceMatrices
+    using Regress: fe
+
+    rng = StableRNG(21)
+    n = 600
+    df = DataFrame(x = randn(rng, n), z1 = randn(rng, n), z3 = randn(rng, n),
+        g = rand(rng, 1:30, n), w = 0.2 .+ rand(rng, n))
+    df.e1 = df.z1 .+ 0.5 .* df.z3 .+ randn(rng, n)
+    df.y = 1 .+ df.x .+ 2 .* df.e1 .+ randn(rng, n)
+    df.g[1] = 99      # a singleton group
+    df.w[3] = 0.0     # a zero weight
+
+    function same(mf, mm)
+        @test isequal(coef(mf), coef(mm))
+        @test isequal(stderror(mf), stderror(mm))
+        @test nobs(mf) == nobs(mm)
+        @test dof(mf) == dof(mm)
+        @test dof_residual(mf) == dof_residual(mm)
+        @test r2(mf) == r2(mm)
+    end
+
+    f = @formula(y ~ x + (e1 ~ z1 + z3))
+    ffe = @formula(y ~ x + (e1 ~ z1 + z3) + fe(g))
+    Z = [ones(n) df.x df.z1 df.z3]
+    X = [ones(n) df.x df.e1]
+    for est in (TSLS(), LIML(), Fuller(1.0), KClass(0.5))
+        same(Regress.iv(est, df, f), Regress.iv(est, Z, X, df.y))
+        same(Regress.iv(est, df, f; weights = :w), Regress.iv(
+            est, Z, X, df.y; weights = df.w))
+        same(Regress.iv(est, df, ffe; progress_bar = false),
+            Regress.iv(est, Z[:, 2:end], X[:, 2:end], df.y; fe = df.g))
+    end
+
+    # Cluster identifiers may cover every input row.
+    mm = Regress.iv(TSLS(), Z[:, 2:end], X[:, 2:end], df.y; fe = df.g, weights = df.w)
+    @test nobs(mm) == n - 2 && !mm.esample[1] && !mm.esample[3]
+    @test stderror(CR1(df.x .> 0), mm) == stderror(CR1((df.x .> 0)[mm.esample]), mm)
+    mf = Regress.iv(TSLS(), df, ffe; weights = :w, progress_bar = false)
+    @test residuals(mm) ≈ residuals(mf)[mf.esample] rtol = 1e-12
+
+    # First-stage and weak-instrument statistics
+    mf, mm = Regress.iv(TSLS(), df, f), Regress.iv(TSLS(), Z, X, df.y)
+    @test first_stage(mf).F_nonrobust ≈ first_stage(mm).F_nonrobust rtol = 1e-12
+    @test first_stage(mf).F_robust ≈ first_stage(mm).F_robust rtol = 1e-12
+    @test weakivtest(mf).F_eff ≈ weakivtest(mm).F_eff rtol = 1e-12
+end
+
+@testitem "IV standard errors follow the coefficients after recategorization" tags = [
+    :iv, :matrix] begin
+    using Regress, DataFrames, StableRNGs, StatsBase, LinearAlgebra
+    using CovarianceMatrices
+
+    # e2 equals the instrument z2, so it is moved to the exogenous block, ahead of e1.
+    rng = StableRNG(21)
+    n = 600
+    df = DataFrame(x = randn(rng, n), z1 = randn(rng, n), z2 = randn(rng, n),
+        z3 = randn(rng, n))
+    df.e1 = df.z1 .+ 0.5 .* df.z3 .+ randn(rng, n)
+    df.e2 = df.z2
+    df.y = 1 .+ df.x .+ 2 .* df.e1 .- df.e2 .+ randn(rng, n)
+
+    m = Regress.iv(TSLS(), df, @formula(y ~ x + (e1 + e2 ~ z1 + z2 + z3)))
+    ref = Regress.iv(TSLS(), df, @formula(y ~ x + e2 + (e1 ~ z1 + z3)))
+    perm = [1, 2, 4, 3]    # ref orders the coefficients (Intercept), x, e2, e1
+    @test coefnames(m) == ["(Intercept)", "x", "e1", "e2"]
+    @test coef(m) ≈ coef(ref)[perm] rtol = 1e-10
+    @test stderror(m) ≈ stderror(ref)[perm] rtol = 1e-10
+    @test sqrt.(diag(vcov(HC1(), m))) ≈ stderror(ref)[perm] rtol = 1e-10
+
+    mm = Regress.iv(TSLS(), [ones(n) df.x df.z1 df.z2 df.z3], [ones(n) df.x df.e1 df.e2],
+        df.y; n_endogenous = 2)
+    @test isequal(coef(mm), coef(m))
+    @test isequal(stderror(mm), stderror(m))
+    @test mm.postestimation.endo_cols == [3]
+    @test first_stage(mm).F_robust ≈ first_stage(m).F_robust rtol = 1e-10
 end

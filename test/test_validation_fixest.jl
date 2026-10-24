@@ -5,7 +5,8 @@
 # - Variance estimators (HC1, cluster_fe1, two-way cluster)
 # - Continuous and categorical instruments
 #
-# Reference values are hardcoded from R fixest (see fixest_validation.R for methodology).
+# Reference values are hardcoded from R fixest 0.14.1, as written by
+# test/validation/fixest_validation.R to fixest_validation_summary.csv.
 # Input data: fixest_validation_data.csv (1000 observations)
 #
 # Tolerances for comparison (defined inline in each test):
@@ -156,9 +157,7 @@ end
     @test r2(m) ≈ R2 rtol = RTOL_R2
 
     # Standard errors - HC1
-    # fixest's residual degrees of freedom count one fewer parameter for the second
-    # fixed effect (its levels hold one redundant parameter); `dof_residual` does not.
-    @test_broken stderror(HC1(), m) ≈ SE_HC1 rtol = RTOL_SE_HC
+    @test stderror(HC1(), m) ≈ SE_HC1 rtol = RTOL_SE_HC
 
     # Standard errors - cluster(fe1)
     m_cl1 = Regress.ols(df, @formula(y ~ x1 + x2 + endo + fe(fe1) + fe(fe2)), save_cluster = :fe1)
@@ -309,7 +308,7 @@ end
     # Coefficients: x1, x2, fit_endo (no intercept with FE)
     COEF = [0.5061660563758806, 0.30523155864404355, 2.0222299546040468]
     R2 = 0.9216172253226353
-    F_IID = 316.4247374994751
+    F_IID = 316.751960599266
 
     # Standard errors by vcov type
     SE_HC1 = [0.04294984682781066, 0.03504025401505687, 0.056889544784780255]
@@ -337,9 +336,7 @@ end
     @test Regress.first_stage(m).F_nonrobust[1] ≈ F_IID rtol = RTOL_F_IID
 
     # Standard errors - HC1
-    # fixest's residual degrees of freedom count one fewer parameter for the second
-    # fixed effect (its levels hold one redundant parameter); `dof_residual` does not.
-    @test_broken stderror(HC1(), m) ≈ SE_HC1 rtol = RTOL_SE_HC
+    @test stderror(HC1(), m) ≈ SE_HC1 rtol = RTOL_SE_HC
 
     # Standard errors - cluster(fe1)
     m_cl1 = Regress.iv(
@@ -492,7 +489,7 @@ end
     # Coefficients: x1, x2, fit_endo (no intercept with FE)
     COEF = [0.47887536778475115, 0.3035932600900931, 2.0960967017271352]
     R2 = 0.9258190793878247
-    F_IID = 32.06047455139025
+    F_IID = 32.093732305074198
 
     # Standard errors by vcov type
     SE_HC1 = [0.047813248315275475, 0.03413860011710209, 0.08038717698779545]
@@ -520,9 +517,7 @@ end
     @test Regress.first_stage(m).F_nonrobust[1] ≈ F_IID rtol = RTOL_F_IID
 
     # Standard errors - HC1
-    # fixest's residual degrees of freedom count one fewer parameter for the second
-    # fixed effect (its levels hold one redundant parameter); `dof_residual` does not.
-    @test_broken stderror(HC1(), m) ≈ SE_HC1 rtol = RTOL_SE_HC
+    @test stderror(HC1(), m) ≈ SE_HC1 rtol = RTOL_SE_HC
 
     # Standard errors - cluster(fe1)
     m_cl1 = Regress.iv(
@@ -681,7 +676,7 @@ end
     # Coefficients: x1, x2, fit_endo (no intercept with FE)
     COEF = [0.4965363222169623, 0.3046534721111661, 2.0482944174190525]
     R2 = 0.9232298394541512
-    F_IID = 117.34077475155085
+    F_IID = 117.462623946516
 
     # Standard errors by vcov type
     SE_HC1 = [0.0408364626875171, 0.03468144876779309, 0.04425207052902298]
@@ -710,9 +705,7 @@ end
     @test Regress.first_stage(m).F_nonrobust[1] ≈ F_IID rtol = RTOL_F_IID
 
     # Standard errors - HC1
-    # fixest's residual degrees of freedom count one fewer parameter for the second
-    # fixed effect (its levels hold one redundant parameter); `dof_residual` does not.
-    @test_broken stderror(HC1(), m) ≈ SE_HC1 rtol = RTOL_SE_HC
+    @test stderror(HC1(), m) ≈ SE_HC1 rtol = RTOL_SE_HC
 
     # Standard errors - cluster(fe1)
     m_cl1 = Regress.iv(Regress.TSLS(), df,

@@ -826,12 +826,15 @@ end
         @test Matrix(vcov(K(cl), ols_mw)) ≈ Matrix(vcov(K(cl), fits[(:ols, :w)])) rtol = 1e-10
     end
 
-    # A zero weight has no place in the weighted hat matrix.
+    # A row with zero weight leaves the estimation sample, so the fit equals one without it.
     w0 = copy(Float64.(df.Pop))
     w0[1] = 0
     ols_w0 = Regress.ols(X, df.Sales; weights = w0)
+    ols_drop = Regress.ols(X[2:end, :], df.Sales[2:end]; weights = w0[2:end])
+    @test nobs(ols_w0) == size(X, 1) - 1
     for K in (CM.CR2, CM.CR3)
-        @test_throws "$(nameof(K)) needs positive weights" vcov(K(df.State), ols_w0)
+        @test Matrix(vcov(K(df.State), ols_w0)) ≈
+              Matrix(vcov(K(df.State[2:end]), ols_drop)) rtol = 1e-12
     end
 end
 

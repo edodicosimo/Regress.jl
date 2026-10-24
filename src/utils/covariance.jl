@@ -539,6 +539,35 @@ function _resolve_clusters(k::CM.DriscollKraay{<:Any, Symbol, Symbol}, m)
     return CM.DriscollKraay(CM.timekernel(k), tis, iis; correction = CM.correction(k))
 end
 
+# A model fitted from matrices takes per-observation data (cluster identifiers,
+# Driscoll-Kraay indices) with one entry per row of its input, or one per observation;
+# the first is restricted to the estimation sample.
+function _sample_rows(v::AbstractVector, m::Union{OLSMatrixEstimator, IVMatrixEstimator},
+        what::String)
+    length(v) == nobs(m) && return v
+    length(v) == length(m.esample) && return esample(m, v)
+    throw(DimensionMismatch(
+        "the $what has $(length(v)) observations; the model was fitted on " *
+        "$(length(m.esample)) rows, of which $(nobs(m)) are in the estimation sample"))
+end
+
+for E in (:CR0, :CR1, :CR2, :CR3, :Cluster)
+    @eval function _resolve_clusters(
+            k::CM.$E{<:Tuple{CM.Clustering, Vararg{CM.Clustering}}},
+            m::Union{OLSMatrixEstimator, IVMatrixEstimator})
+        return CM.$E(map(c -> _sample_rows(CM.groups(c), m, "cluster variable"),
+            CM.clusters(k)))
+    end
+end
+function _resolve_clusters(
+        k::CM.DriscollKraay{<:Any, <:AbstractVector, <:AbstractVector},
+        m::Union{OLSMatrixEstimator, IVMatrixEstimator})
+    return CM.DriscollKraay(CM.timekernel(k),
+        _sample_rows(CM.timeindex(k), m, "Driscoll-Kraay time index"),
+        _sample_rows(CM.unitindex(k), m, "Driscoll-Kraay unit index");
+        correction = CM.correction(k))
+end
+
 # The column names that `k` looks up in the stored cluster data.
 _cluster_names(k) = CM.clusters(k)
 _cluster_names(k::CM.DriscollKraay) = (CM.timeindex(k), CM.unitindex(k))
@@ -688,43 +717,27 @@ CM.bread(m::OLSEstimator) = invchol(m.pp)
 CM.leverage(m::OLSEstimator) = StatsAPI.leverage(m)
 
 """
-    leverage(m::OLSEstimator)
+    leverage(m::Union{OLSEstimator, OLSMatrixEstimator})
 
-Compute leverage values (diagonal of hat matrix H = X(X'X)^(-1)X').
-Uses h_i = ||X_i * U^(-1)||^2 where X'X = U'U for efficiency.
+Diagonal of the hat matrix X(X'X)⁻¹X', over the columns of X that collinearity detection
+kept (the others have no coefficient).
 """
-function StatsAPI.leverage(m::OLSEstimator{T, <:OLSPredictorChol}) where {T}
-    # For Cholesky: X'X = U'U, so (X'X)^(-1) = U^(-1) * U^(-T)
-    # h_i = X_i * U^(-1) * U^(-T) * X_i' = ||X_i * U^(-1)||^2
-    X = modelmatrix(m)
-    # Compute X / U and use column-major friendly sum
-    # XU = X / U is n×k, we want row-wise sum of squares
-    # Transpose to k×n for column-major access: sum(abs2, XU', dims=1)
-    XU = X / m.pp.chol.U
-    return vec(sum(abs2, XU', dims = 1))
+function StatsAPI.leverage(m::OLSModel)
+    has_predictor_data(m.pp) ||
+        throw(ArgumentError("Model matrix not stored. Model was fit with save=:minimal."))
+    return _leverage(m.pp)
 end
 
-function StatsAPI.leverage(m::OLSEstimator{T, <:OLSPredictorQR}) where {T}
-    # For QR: X = QR, so (X'X)^(-1) = R^(-1) R^(-T)
-    # H = X(X'X)^(-1)X' and h_i = X_i (X'X)^(-1) X_i' = ||X_i R^(-1)||^2
-    # Using R-factor directly avoids materializing full n×n Q matrix
-    X = modelmatrix(m)
-    R = m.pp.qr.R
-    # Solve X / R using forward substitution: O(nk²) vs O(n²k) for full Q
-    XRinv = X / UpperTriangular(R)
-    return vec(sum(abs2, XRinv, dims = 2))
-end
-
-function StatsAPI.leverage(m::OLSEstimator{T, <:OLSPredictorSweep}) where {T}
-    # For Sweep: (X'X)^(-1) is stored directly in pp.invXX
-    # h_i = X_i * (X'X)^(-1) * X_i'
-    # Compute via Cholesky of invXX: invXX = L * L', then h_i = ||X_i * L||^2
-    X_reduced = m.pp.X_reduced
-    invXX = m.pp.invXX
-    # Cholesky factorization of invXX for efficient computation
-    L = cholesky(invXX).L
-    XL = X_reduced * L
-    return vec(sum(abs2, XL, dims = 2))
+# h_i = ‖X_i F⁻¹‖² for upper-triangular F with X'X = F'F. A product with the k×k inverse:
+# the right division X / F runs as a triangular solve over all n rows, which BLAS does
+# several times more slowly.
+_triangular_leverage(X, F) = vec(sum(abs2, X * inv(F), dims = 2))
+_leverage(pp::OLSPredictorChol) = _triangular_leverage(pp.X_reduced, pp.chol.U)
+_leverage(pp::OLSPredictorQR) = _triangular_leverage(pp.X_reduced, UpperTriangular(pp.qr.R))
+function _leverage(pp::OLSPredictorSweep)
+    # (X'X)⁻¹ is stored: with (X'X)⁻¹ = LL', h_i = ‖X_i L‖²
+    L = cholesky(pp.invXX).L
+    return vec(sum(abs2, pp.X_reduced * L, dims = 2))
 end
 
 # Residual adjustment for OLS models (both OLSEstimator and OLSMatrixEstimator).
@@ -918,36 +931,6 @@ Compute (X'X)^(-1), the "bread" of the sandwich variance estimator.
 CM.bread(m::OLSMatrixEstimator) = invchol(m.pp)
 
 CM.leverage(m::OLSMatrixEstimator) = StatsAPI.leverage(m)
-
-"""
-    leverage(m::OLSMatrixEstimator)
-
-Compute leverage values (diagonal of hat matrix H = X(X'X)^(-1)X').
-"""
-function StatsAPI.leverage(m::OLSMatrixEstimator{T, <:OLSPredictorChol}) where {T}
-    X = modelmatrix(m)
-    # Transpose for column-major access: sum(abs2, XU', dims=1)
-    XU = X / m.pp.chol.U
-    return vec(sum(abs2, XU', dims = 1))
-end
-
-function StatsAPI.leverage(m::OLSMatrixEstimator{T, <:OLSPredictorQR}) where {T}
-    # For QR: (X'X)^(-1) = R^(-1) R^(-T)
-    # h_i = ||X_i R^(-1)||^2, using R-factor directly avoids materializing full Q
-    X = modelmatrix(m)
-    R = m.pp.qr.R
-    XRinv = X / UpperTriangular(R)
-    return vec(sum(abs2, XRinv, dims = 2))
-end
-
-function StatsAPI.leverage(m::OLSMatrixEstimator{T, <:OLSPredictorSweep}) where {T}
-    # For Sweep: (X'X)^(-1) is stored directly
-    X_reduced = m.pp.X_reduced
-    invXX = m.pp.invXX
-    L = cholesky(invXX).L
-    XL = X_reduced * L
-    return vec(sum(abs2, XL, dims = 2))
-end
 
 # Note: residualadjustment methods for OLSMatrixEstimator are provided by the
 # OLSModel type union (Union{OLSEstimator, OLSMatrixEstimator}) defined earlier

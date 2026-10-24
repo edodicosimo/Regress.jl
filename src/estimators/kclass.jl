@@ -38,19 +38,58 @@ function _kclass_kappa(est::AbstractIVEstimator, y::AbstractVector{T},
 end
 
 """
+    _fit_kclass_kernel(est, y, Xexo, Xendo, Z, wts, fes; kwargs...) -> (fit, fe_solve)
+
+The k-class estimator `est` (`LIML()`, `Fuller(a)` or `KClass(kappa)`) of `y` on
+`[Xexo, Xendo]` with instruments `[Xexo, Z]` and weights `wts`, absorbing the fixed
+effects `fes`. Both `iv(estimator, df, formula)` and `iv(estimator, Z, X, y)` estimate
+through this function, so equal data and settings give identical results. See
+[`_fit_tsls_kernel`](@ref) for the inputs and the layout of `fit`; `fit.Xhat` and
+`fit.bread` hold the k-class adjustment matrix `Adj` and `inv(A)`.
+"""
+function _fit_kclass_kernel(est::AbstractIVEstimator, y::Vector{T}, Xexo::Matrix{T},
+        Xendo::Matrix{T}, Z::Matrix{T}, wts::AbstractWeights, fes::Vector{<:FixedEffect};
+        iv_fes::Vector{FixedEffect} = FixedEffect[], has_intercept::Bool,
+        dof_add::Integer, first_stage::Bool, kwargs...) where {T <: AbstractFloat}
+    isempty(iv_fes) || throw(ArgumentError(
+        "fixed effects as excluded instruments are supported by TSLS only, not by " *
+        "$(_estimator_name(est))"))
+    prep, fe_solve = _iv_prepare!(y, Xexo, Xendo, Z, wts, fes; has_intercept, kwargs...)
+    Xexo, Xendo, Z = prep.Xexo, prep.Xendo, prep.Z
+    size(Z, 2) >= size(Xendo, 2) ||
+        throw(ArgumentError("Model not identified. There must be at least as many instruments as endogenous variables"))
+    n = length(y)
+    n_exo, n_endo = size(Xexo, 2), size(Xendo, 2)
+
+    kappa = _kclass_kappa(est, y, Xendo, Z, Xexo)
+    coef_kclass, residuals, invA, Adj = _kclass_fit(y, Xendo, Z, Xexo, kappa)
+
+    # `_kclass_fit` orders the coefficients [endogenous; exogenous]
+    idx = vcat((n_endo + 1):(n_endo + n_exo), 1:n_endo)
+    coef_reduced = coef_kclass[idx]
+    X = hcat(Xexo, Xendo)
+
+    newZ = hcat(Xexo, Z)
+    Pi = first_stage ? qr(newZ) \ Xendo : Matrix{T}(undef, size(newZ, 2), 0)
+    fs_stats = _iv_first_stage_stats(first_stage, Xendo, newZ * Pi, newZ, Pi, prep.XexoZ,
+        prep.ZZ, prep, iv_fes, n, has_intercept)
+
+    coef, basis_coef, order, endo_cols = _iv_formula_order(prep.coll, coef_reduced, n_exo)
+    issorted(order) || (X = X[:, order])
+    Adj = Adj[:, idx[order]]
+    invA = Symmetric(invA[idx[order], idx[order]])
+
+    return _iv_kernel_inference(; coef, basis_coef, X, Xhat = Adj, bread = invA,
+        crossx = cholesky(Symmetric(X' * X)), y, Z = newZ, endo_cols, residuals, prep,
+        dof_add, has_intercept, fs_stats, kappa),
+    fe_solve
+end
+
+"""
     fit_kclass_estimator(estimator, df, formula; kwargs...) -> IVEstimator{T}
 
-Internal function to fit K-class IV estimators (LIML, Fuller, KClass).
-This function shares most of the data preparation with TSLS, but uses
-the K-class coefficient formula instead of two-stage least squares.
-
-# Arguments
-- `estimator::AbstractIVEstimator`: One of LIML(), Fuller(a), or KClass(k)
-- `df`: DataFrame containing the data
-- `formula`: Formula with IV syntax
-
-# Returns
-- `IVEstimator{T, V}`: Fitted model with parametric vcov type
+Fit a k-class IV estimator (`LIML()`, `Fuller(a)` or `KClass(kappa)`) from a table and
+a formula; see [`iv`](@ref) for the keywords.
 """
 function fit_kclass_estimator(
         estimator::AbstractIVEstimator,
@@ -64,443 +103,34 @@ function fit_kclass_estimator(
         method::Symbol = :cpu,
         nthreads::Integer = method == :cpu ? Threads.nthreads() : 256,
         double_precision::Bool = method == :cpu,
-        tol::Real = 1e-6,
-        maxiter::Integer = 10000,
+        fe_tol::Union{Real, Nothing} = nothing,
+        fe_maxiter::Union{Integer, Nothing} = nothing,
+        tol::Union{Real, Nothing} = nothing,
+        maxiter::Union{Integer, Nothing} = nothing,
         drop_singletons::Bool = true,
         progress_bar::Bool = true,
         subset::Union{Nothing, AbstractVector} = nothing,
-        first_stage::Bool = true
-)
-    # Validate save keyword
-    save, save_residuals = validate_save_keyword(save)
-
-    # Check nthreads
-    nthreads = validate_nthreads(method, nthreads)
-
-    # Convert contrasts to Dict{Symbol, Any}
-    contrasts = convert(Dict{Symbol, Any}, contrasts)
-
-    # Convert to DataFrame
-    df = DataFrame(df; copycols = false)
-
-    ##############################################################################
-    ## Prepare Data (same as TSLS)
-    ##############################################################################
-
-    data_prep = prepare_data(df, formula, weights, subset, save, drop_singletons, nthreads)
-
-    # Extract cluster variables
-    cluster_data = extract_cluster_variables(df, data_prep.fe_vars, save_cluster, data_prep.esample)
-
-    # Create subsetted dataframe and weights
-    if data_prep.has_weights
-        wts = Weights(disallowmissing(view(df[!, weights], data_prep.esample)))
-    else
-        wts = uweights(data_prep.nobs)
-    end
-
-    # Create subsetted dataframe
-    subdf = _create_subdf(df, data_prep.all_vars, data_prep.esample)
-    subfes = isempty(data_prep.fes) ? FixedEffect[] :
-             FixedEffect[fe[data_prep.esample] for fe in data_prep.fes]
-
-    ##############################################################################
-    ## Create Model Matrices
-    ##############################################################################
-
-    T = double_precision ? Float64 : Float32
-
-    # Apply schema for exogenous variables
-    s = schema(data_prep.formula, subdf, contrasts)
-    formula_schema = apply_schema(data_prep.formula, s, IVEstimator, data_prep.has_fe_intercept)
-
-    y_raw = response(formula_schema, subdf)
-    y_raw isa AbstractVector || throw(ArgumentError(
-        "the response variable must be numeric (got a matrix — " *
-        "check that the dependent variable column is not a String or categorical type)"))
-    y = convert(Vector{T}, y_raw)
-    Xexo = convert(Matrix{T}, modelmatrix(formula_schema, subdf))
-    response_name, coefnames_exo = coefnames(formula_schema)
-
-    # Create endogenous and instrument matrices
-    formula_endo_schema = apply_schema(data_prep.formula_endo,
-        schema(data_prep.formula_endo, subdf, contrasts),
-        StatisticalModel)
-    Xendo = convert(Matrix{T}, modelmatrix(formula_endo_schema, subdf))
-    _, coefnames_endo = coefnames(formula_endo_schema)
-
-    formula_iv_schema = apply_schema(data_prep.formula_iv,
-        schema(data_prep.formula_iv, subdf, contrasts),
-        StatisticalModel)
-    Z = convert(Matrix{T}, modelmatrix(formula_iv_schema, subdf))
-    _, coefnames_iv = coefnames(formula_iv_schema)
-
-    # Modify formula schema for prediction
-    # Use concrete vector to avoid runtime dispatch
-    schema_terms = collect(AbstractTerm, eachterm(formula_schema.rhs))
-    for term in eachterm(formula_endo_schema.rhs)
-        if term != ConstantTerm(0)
-            push!(schema_terms, term)
-        end
-    end
-    formula_schema = FormulaTerm(formula_schema.lhs, MatrixTerm(Tuple(schema_terms)))
-
-    coef_names = vcat(coefnames_exo, coefnames_endo)
-
-    # Filter rows with NaN (e.g. from lags() producing NaN for out-of-bounds entries)
-    y, (Xexo, Xendo, Z), wts, subfes, nobs_eff,
-    has_nan_rows, nan_rows = _filter_nan_rows(
-        y, (Xexo, Xendo, Z), wts, subfes)
-
-    # Compute total sum of squares
-    tss_total = tss(y, data_prep.has_intercept | data_prep.has_fe_intercept, wts)
-
-    # Validate finite values
-    all(isfinite, wts) || throw(ArgumentError("Weights are not finite"))
-    all(isfinite, y) ||
-        throw(ArgumentError("Some observations for the dependent variable are infinite"))
-    all(isfinite, Xexo) ||
-        throw(ArgumentError("Some observations for the exogenous variables are infinite"))
-    all(isfinite, Xendo) ||
-        throw(ArgumentError("Some observations for the endogenous variables are infinite"))
-    all(isfinite, Z) ||
-        throw(ArgumentError("Some observations for the instrumental variables are infinite"))
-
-    ##############################################################################
-    ## Partial Out Fixed Effects
-    ##############################################################################
-
-    oldy, oldX = nothing, nothing
-    feM = nothing
-
-    if data_prep.has_fes
-        cols = vcat(eachcol(y), eachcol(Xexo), eachcol(Xendo), eachcol(Z))
-        colnames = vcat(response_name, coefnames_exo, coefnames_endo, coefnames_iv)
-
-        feM, iterations,
-        converged,
-        tss_partial,
-        oldy_temp,
-        oldX_temp = partial_out_fixed_effects!(
-            cols, colnames, subfes, wts, method, nthreads,
-            tol, maxiter, progress_bar, data_prep.save_fes,
-            data_prep.has_intercept, data_prep.has_fe_intercept, T)
-
-        if data_prep.save_fes && oldX_temp !== nothing
-            n_exo = size(Xexo, 2)
-            oldX = hcat(oldX_temp[:, 1:n_exo], oldX_temp[:, (n_exo + 1):(n_exo + size(Xendo, 2))])
-            oldy = oldy_temp
-        end
-    else
-        iterations, converged = 0, true
-        tss_partial = tss_total
-    end
-
-    ##############################################################################
-    ## Apply Weights
-    ##############################################################################
-
-    if data_prep.has_weights
-        sqrtw = sqrt.(wts)
-        y .= y .* sqrtw
-        Xexo .= Xexo .* sqrtw
-        Xendo .= Xendo .* sqrtw
-        Z .= Z .* sqrtw
-    end
-
-    ##############################################################################
-    ## Collinearity Detection (shared with TSLS)
-    ##############################################################################
-
-    XexoXexo = compute_crossproduct(Xexo)
-    XendoXendo = compute_crossproduct(Xendo)
-    ZZ = compute_crossproduct(Z)
-
-    coll = _iv_collinearity_detection!(
-        Xexo, Xendo, Z, XexoXexo, XendoXendo, ZZ,
-        data_prep.has_intercept, coefnames_endo
-    )
-
-    Xexo, Xendo, Z = coll.Xexo, coll.Xendo, coll.Z
-    XexoXexo, ZZ = coll.XexoXexo, coll.ZZ
-    XexoZ, XexoXendo, ZXendo = coll.XexoZ, coll.XexoXendo, coll.ZXendo
-    basis_coef, perm = coll.basis_coef, coll.perm
-    basis_endo, basis_endo_small = coll.basis_endo, coll.basis_endo_small
-
-    # Check identification
-    size(ZXendo, 1) >= size(ZXendo, 2) ||
-        throw(ArgumentError("Model not identified. There must be at least as many instruments as endogenous variables"))
-
-    ##############################################################################
-    ## Compute K-class Kappa
-    ##############################################################################
-
-    k_exo_final = size(Xexo, 2)
-    k_z_final = size(Z, 2)
-    k_endo_final = size(Xendo, 2)
-
-    kappa = _kclass_kappa(estimator, y, Xendo, Z, Xexo)
-
-    ##############################################################################
-    ## K-Class Coefficient Estimation
-    ##############################################################################
-
-    # Use the core K-class fitting algorithm
-    coef_kclass, residuals_kclass, invA, Adj = _kclass_fit(y, Xendo, Z, Xexo, kappa)
-
-    # Reorder coefficients: exogenous first, then endogenous
-    # _kclass_fit returns [endogenous, exogenous], but we want [exogenous, endogenous]
-    n_endo = size(Xendo, 2)
-    n_exo = size(Xexo, 2)
-    coef = vcat(coef_kclass[(n_endo + 1):end], coef_kclass[1:n_endo])
-
-    # Also reorder invA and Adj accordingly
-    reorder_idx = vcat((n_endo + 1):(n_endo + n_exo), 1:n_endo)
-    invA_reordered = Symmetric(invA[reorder_idx, reorder_idx])
-    Adj_reordered = Adj[:, reorder_idx]
-
-    # Build X = [Xexo, Xendo] for storing
-    X = hcat(Xexo, Xendo)
-
-    # For K-class, Xhat is not meaningful in the same way as TSLS
-    # We use X directly but store Adj for vcov calculation
-    Xhat = X  # Use original X for prediction purposes
-
-    # Compute XhatXhat for storage (used in some calculations)
-    XhatXhat = Symmetric(X' * X)
-
-    ##############################################################################
-    ## First-Stage F-Statistics (if requested)
-    ##############################################################################
-
-    F_first_stage_nonrobust = T[]
-    p_first_stage_nonrobust = T[]
-    F_first_stage_robust = T[]
-    p_first_stage_robust = T[]
-    F_kp_joint, p_kp_joint = T(NaN), T(NaN)
-    first_stage_data = empty_first_stage_data(T)
-    newZ = hcat(Xexo, Z)  # Needed for PostEstimationData leverage computation
-
-    if first_stage && k_endo_final > 0
-        # Compute first-stage quantities using the same helper as TSLS
-        # Need to build Pi via first stage regression first
-        newZnewZ_aug = build_block_symmetric(
-            [XexoXexo.data, XexoZ, XexoXendo, ZZ.data,
-                ZXendo, zeros(T, k_endo_final, k_endo_final)],
-            [k_exo_final, k_z_final, k_endo_final]
-        )
-        Pi = ls_solve!(newZnewZ_aug, k_exo_final + k_z_final)
-
-        endo_names_final = if all(basis_endo)
-            collect(String.(coefnames_endo))
-        else
-            endo_idx = findall(basis_endo)
-            if !all(basis_endo_small)
-                endo_idx = endo_idx[basis_endo_small]
-            end
-            [String(coefnames_endo[i]) for i in endo_idx]
-        end
-
-        dof_fes_local = sum(nunique(fe) for fe in subfes; init = 0)
-
-        fstats = _iv_first_stage_fstats_standard(
-            Xendo, newZ, Pi, XexoXexo, XexoZ, ZZ,
-            nobs_eff, dof_fes_local, endo_names_final,
-            k_exo_final, data_prep.has_intercept)
-
-        first_stage_data = fstats.first_stage_data
-        F_first_stage_robust,
-        p_first_stage_robust = fstats.F_kp_per_endo, fstats.p_kp_per_endo
-        F_first_stage_nonrobust,
-        p_first_stage_nonrobust,
-        _, _ = _compute_first_stage_f_iid(first_stage_data, nobs_eff, dof_fes_local)
-        F_kp_joint, p_kp_joint = fstats.F_kp, fstats.p_kp
-    end
-
-    ##############################################################################
-    ## Compute Statistics
-    ##############################################################################
-
-    # Residuals (esample only, for vcov computation)
-    residuals_raw = residuals_kclass
-    # Unweight residuals if model was estimated with weights
-    residuals_esample = if data_prep.has_weights
-        residuals_raw ./ sqrt.(wts)
-    else
-        residuals_raw
-    end
-
-    # Degrees of freedom
-    ngroups_fes = [nunique(fe) for fe in subfes]
-    dof_fes = sum(ngroups_fes)
-    dof_residual = max(1, nobs_eff - size(X, 2) - dof_fes - dof_add)
-
-    # R-squared (use raw weighted residuals for RSS)
-    rss = sum(abs2, residuals_raw)
-    r2_within = data_prep.has_fes ? one(T) - rss / tss_partial : one(T) - rss / tss_total
-
-    # F-statistic and p-value
-    tss_for_fstat = data_prep.has_fes ? tss_partial : tss_total
-    mss_val = tss_for_fstat - rss
-    dof_model = size(X, 2) - (data_prep.has_intercept & !data_prep.has_fe_intercept)
-    F_stat = dof_model > 0 ? (mss_val / dof_model) / (rss / dof_residual) : T(NaN)
-    p_val = dof_model > 0 ? fdistccdf(dof_model, dof_residual, F_stat) : T(NaN)
-
-    ##############################################################################
-    ## Handle Omitted Variables
-    ##############################################################################
-
-    if !all(basis_coef)
-        newcoef = zeros(T, length(basis_coef))
-        newindex = [searchsortedfirst(cumsum(basis_coef), i) for i in 1:length(coef)]
-        for i in eachindex(newindex)
-            newcoef[newindex[i]] = coef[i]
-        end
-        newcoef[.!basis_coef] .= T(NaN)
-        coef = newcoef
-
-        # Also expand invA_reordered and Adj_reordered
-        # For omitted variables, set corresponding rows/cols to 0
-        k_total = length(basis_coef)
-        k_active = sum(basis_coef)
-
-        invA_full = zeros(T, k_total, k_total)
-        active_idx = findall(basis_coef)
-        invA_full[active_idx, active_idx] .= invA_reordered
-        invA_reordered = Symmetric(invA_full)
-
-        Adj_full = zeros(T, size(Adj_reordered, 1), k_total)
-        Adj_full[:, active_idx] .= Adj_reordered
-        Adj_reordered = Adj_full
-    end
-
-    # Handle permutation from recategorization
-    if perm !== nothing
-        _invperm = invperm(perm)
-        coef = coef[_invperm]
-        basis_coef = basis_coef[_invperm]
-        invA_reordered = Symmetric(invA_reordered.data[_invperm, _invperm])
-        Adj_reordered = Adj_reordered[:, _invperm]
-    end
-
-    ##############################################################################
-    ## Create PostEstimationData
-    ##############################################################################
-
-    # For K-class, we store:
-    # - X: the adjustment matrix Adj for vcov calculation
-    # - Xhat: original X with actual variables
-    # - invXX: inv(A) from K-class formula
-    # - Adj: the adjustment matrix
-    # - kappa: the K-class parameter
-
-    # FE nesting detection data
-    ngroups_fes = [nunique(fe) for fe in subfes]
-    fe_groups = Vector{Int}[fe.refs for fe in subfes]
-
-    # For leverage calculation (AER formula), we need the FULL instrument matrix
-    # newZ = hcat(Xexo, Z) was computed earlier for the first stage
-    Z_full = newZ
-    Z_fullZZ = Symmetric(Z_full' * Z_full)
-    invZ_fullZZ = Symmetric(cholesky(Z_fullZZ) \ I)
-
-    postestimation_data = PostEstimationDataIV(
-        convert(Matrix{T}, Adj_reordered),  # X_fitted: use Adj for vcov moment matrix
-        convert(Matrix{T}, X),               # X_original: original X
-        convert(Vector{T}, y),               # y: response vector
-        cholesky(Symmetric(X' * X)),        # crossx
-        invA_reordered,                      # invXX: inv(A) for K-class
-        wts,
-        cluster_data,
-        basis_coef,
-        first_stage_data,
-        convert(Matrix{T}, Adj_reordered),  # Adj: K-class adjustment matrix
-        kappa,                               # kappa: K-class parameter
-        convert(Matrix{T}, Z_full), invZ_fullZZ,  # Full instrument matrix for leverage
-        fe_groups, data_prep.fekeys, ngroups_fes
-    )
-
-    ##############################################################################
-    ## Solve for Fixed Effects (if requested)
-    ##############################################################################
-
-    augmentdf = DataFrame()
-    if data_prep.save_fes && oldy !== nothing
-        coef_nonnan = coef[basis_coef]
-        newfes, b,
-        c = solve_coefficients!(oldy - oldX * coef_nonnan, feM;
-            tol = tol, maxiter = maxiter)
-        for fekey in data_prep.fekeys
-            augmentdf[!, fekey] = df[!, fekey]
-        end
-        for j in eachindex(subfes)
-            augmentdf[!, data_prep.feids[j]] = Vector{Union{T, Missing}}(missing, data_prep.nrows)
-            augmentdf[data_prep.esample, data_prep.feids[j]] = newfes[j]
-        end
-    end
-
-    esample_final = data_prep.esample isa Colon ? trues(data_prep.nrows) :
-                    BitVector(data_prep.esample)
-    if has_nan_rows
-        idx = findall(esample_final)
-        esample_final[idx[nan_rows]] .= false
-    end
-
-    ##############################################################################
-    ## Compute Default Vcov (HC1) and Related Statistics
-    ##############################################################################
-
-    # For K-class, the vcov "bread" is invA (stored in invXX)
-    # and the "meat" uses Adj (stored in X field of postestimation_data)
-
-    # Compute HC1 vcov: invA * (Adj .* u)' * (Adj .* u) * invA * scale
-    n = nobs_eff
-    k = size(X, 2)
-    scale = T(n / dof_residual)
-
-    M = Adj_reordered .* residuals_raw
-    meat = M' * M
-    vcov_matrix = Symmetric(scale .* invA_reordered * meat * invA_reordered)
-
-    # Compute standard errors
-    se = sqrt.(diag(vcov_matrix))
-
-    # Compute t-statistics and p-values
-    coef_full = copy(coef)
-    coef_full[.!basis_coef] .= zero(T)
-    t_stats = coef_full ./ se
-    p_values = 2 .* tdistccdf.(dof_residual, abs.(t_stats))
-
-    # Compute robust F-statistic (Wald test)
-    F_stat_robust,
-    p_val_robust = compute_robust_fstat(
-        coef_full, vcov_matrix, data_prep.has_intercept, dof_residual)
-
-    # Default vcov estimator (HC1)
-    default_vcov = CovarianceMatrices.HC1()
-
-    ##############################################################################
-    ## Return IVEstimator
-    ##############################################################################
-
-    return IVEstimator{
-        T, typeof(estimator), typeof(default_vcov), typeof(postestimation_data),
-        typeof(vcov_matrix)}(
-        estimator,  # Store the actual estimator (LIML, Fuller, KClass)
-        coef,
-        esample_final, residuals_esample, save_residuals, augmentdf,
-        postestimation_data,
-        data_prep.fekeys, coef_names, response_name,
-        data_prep.formula_origin, formula_schema, contrasts,
-        nobs_eff, dof_model, dof_fes, dof_residual,
-        rss, tss_total,
-        iterations, converged, r2_within,
-        default_vcov, vcov_matrix, se, t_stats, p_values,
-        F_stat_robust, p_val_robust,
-        F_first_stage_nonrobust, p_first_stage_nonrobust,
-        F_first_stage_robust, p_first_stage_robust,
-        F_kp_joint, p_kp_joint
-    )
+        first_stage::Bool = true)
+    fe_tol = _renamed_keyword(fe_tol, tol, :fe_tol, :tol, :iv, 1e-8)
+    fe_maxiter = _renamed_keyword(fe_maxiter, maxiter, :fe_maxiter, :maxiter, :iv, 10000)
+    prep = _iv_formula_data(df, formula; contrasts, weights, save, save_cluster, method,
+        nthreads, double_precision, drop_singletons, subset)
+    return _fit_kclass_formula(estimator, prep.y, prep.Xexo, prep.Xendo, prep.Z,
+        prep.wts, prep.subfes; prep, fe_tol, fe_maxiter, method, nthreads = prep.nthreads,
+        progress_bar, dof_add, first_stage)
+end
+
+# The formula k-class fit from its model matrices onward, compiled for the concrete `T`.
+function _fit_kclass_formula(est::AbstractIVEstimator, y::Vector{T}, Xexo::Matrix{T},
+        Xendo::Matrix{T}, Z::Matrix{T}, wts, subfes; prep, fe_tol, fe_maxiter, method,
+        nthreads, progress_bar, dof_add, first_stage) where {T}
+    data_prep = prep.data_prep
+    fit, fe_solve = _fit_kclass_kernel(est, y, Xexo, Xendo, Z, wts, subfes;
+        iv_fes = prep.iv_fes, _iv_kernel_names(prep)..., fe_tol, fe_maxiter, method,
+        nthreads, progress_bar, has_intercept = data_prep.has_intercept,
+        has_fe_intercept = data_prep.has_fe_intercept, save_fes = data_prep.save_fes,
+        dof_add, first_stage)
+    return _iv_formula_result(est, fit, fe_solve, prep, wts, subfes, fe_tol, fe_maxiter)
 end
 
 # Convenience wrappers

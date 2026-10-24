@@ -544,54 +544,14 @@ function StatsAPI.leverage(m::IVEstimator)
         return vec(sum(Adj .* (Adj * invXX), dims = 2))
     end
 
-    # TSLS uses AER formula: h = diag(X * invXhatXhat * X' * Z * invZZ * Z')
-    X_orig = pe.X_original
-    invXhatXhat = pe.invXX
-    Z = pe.Z
-    invZZ = pe.invZZ
-
-    # Compute A = X * invXhatXhat * X' (this is n x n, but we only need for diag computation)
-    # Compute P_Z = Z * invZZ * Z' (projection onto instruments)
-    # h = diag(A * P_Z)
-    #
-    # Efficient computation: h_i = (X_i * invXhatXhat * X') * (Z * invZZ * Z'_i)
-    # = sum_j (X_i * invXhatXhat * X_j') * (Z_j * invZZ * Z_i')
-    #
-    # More efficient: compute A_row = X_i * invXhatXhat * X' for each i
-    # then h_i = A_row * P_Z[:, i] = A_row * Z * invZZ * Z_i'
-    #
-    # Best approach: compute full matrices and take diagonal
-    # A = X * invXhatXhat * X'
-    # B = Z * invZZ * Z'
-    # h = diag(A * B)
-    #
-    # For memory efficiency, compute row by row:
-    n = size(X_orig, 1)
-    h = Vector{eltype(X_orig)}(undef, n)
-    XinvXX = X_orig * invXhatXhat  # n x k
-    ZinvZZ = Z * invZZ              # n x q
-
-    @inbounds for i in 1:n
-        # A_row_i = X_i * invXhatXhat * X' = XinvXX[i, :] * X'
-        # h_i = A_row_i * Z * invZZ * Z_i' = sum_j (XinvXX[i, :] ⋅ X[j, :]) * (ZinvZZ[j, :] ⋅ Z[i, :])
-        hi = zero(eltype(X_orig))
-        for j in 1:n
-            # (X_i * invXhatXhat) ⋅ X_j
-            a_ij = zero(eltype(X_orig))
-            for k in 1:size(XinvXX, 2)
-                a_ij += XinvXX[i, k] * X_orig[j, k]
-            end
-            # (Z * invZZ)_j ⋅ Z_i
-            b_ji = zero(eltype(Z))
-            for q in 1:size(ZinvZZ, 2)
-                b_ji += ZinvZZ[j, q] * Z[i, q]
-            end
-            hi += a_ij * b_ji
-        end
-        h[i] = hi
-    end
-    return h
+    return _tsls_leverage(pe.X_original, pe.X_fitted, pe.invXX)
 end
+
+# TSLS leverage, as R's AER::ivreg: h = diag(X (X̂'X̂)⁻¹ X' P_Z) with P_Z the projection on
+# all the instruments. P_Z X is the first-stage fit X̂, so row i is X_i (X̂'X̂)⁻¹ X̂_i'.
+# This holds whatever the instruments are, fixed effects used as instruments included,
+# and costs O(n·k) rather than the O(n²) of forming P_Z.
+_tsls_leverage(X, Xhat, invXhatXhat) = vec(sum((X * invXhatXhat) .* Xhat, dims = 2))
 
 # Residual adjustments for HC/HR estimators come from
 # `CovarianceMatrices.residual_adjustment`, which reaches the model through the
@@ -1385,35 +1345,6 @@ function fe(m::IVEstimator; keepkeys = false)
     end
 end
 
-function StatsAPI.coeftable(m::IVEstimator; level = 0.95)
-    cc = coef(m)
-    se = m.se
-    tt = m.t_stats
-    pv = m.p_values
-    coefnms = coefnames(m)
-
-    # Compute confidence intervals using precomputed se
-    scale = tdistinvcdf(dof_residual(m), 1 - (1 - level) / 2)
-    conf_int = hcat(cc .- scale .* se, cc .+ scale .* se)
-
-    # put (intercept) last
-    if !isempty(coefnms) &&
-       ((coefnms[1] == Symbol("(Intercept)")) || (coefnms[1] == "(Intercept)"))
-        newindex = vcat(2:length(cc), 1)
-        cc = cc[newindex]
-        se = se[newindex]
-        tt = tt[newindex]
-        pv = pv[newindex]
-        conf_int = conf_int[newindex, :]
-        coefnms = coefnms[newindex]
-    end
-
-    CoefTable(
-        hcat(cc, se, tt, pv, conf_int[:, 1:2]),
-        ["Estimate", "Std. Error", "t-stat", "Pr(>|t|)", "Lower 95%", "Upper 95%"],
-        ["$(coefnms[i])" for i in 1:length(cc)], 4)
-end
-
 ##############################################################################
 ##
 ## IVMatrixEstimator - Matrix-based IV estimation (like OLSMatrixEstimator)
@@ -1423,16 +1354,22 @@ end
 """
     PostEstimationDataIVMatrix{T}
 
-Stores data needed for post-estimation variance computation in matrix-based IV.
+Stores data needed for post-estimation variance computation in matrix-based IV. The
+matrices hold the estimation sample, demeaned on the absorbed fixed effects and scaled by
+`√w` for a weighted fit; their columns are the estimated coefficients (collinear columns
+dropped), in the order of the columns of `X`.
 
 # Fields
-- `X::Matrix{T}`: Original regressor matrix [Xexo, Xendo]
-- `Z::Matrix{T}`: Instrument matrix [Xexo, Zinstr]
-- `X_hat::Matrix{T}`: Projected regressors P_Z * X
+- `X::Matrix{T}`: Regressor matrix
+- `Z::Matrix{T}`: Instrument matrix: the exogenous columns of `X`, in order, then the
+  excluded instruments
+- `X_hat::Matrix{T}`: Projected regressors P_Z * X (the adjustment matrix `Adj` for the
+  k-class estimators)
 - `y::Vector{T}`: Response vector
 - `residuals::Vector{T}`: Residuals e = y - X*β
-- `invXhatXhat::Matrix{T}`: (X̂'X̂)⁻¹ for sandwich formula
-- `n_endogenous::Int`: Number of endogenous variables
+- `invXhatXhat::Matrix{T}`: (X̂'X̂)⁻¹ for sandwich formula (`inv(A)` for k-class)
+- `endo_cols::Vector{Int}`: Columns of `X` that are endogenous
+- `weights::Vector{T}`: Observation weights (empty for an unweighted fit)
 """
 struct PostEstimationDataIVMatrix{T <: AbstractFloat}
     X::Matrix{T}
@@ -1441,8 +1378,12 @@ struct PostEstimationDataIVMatrix{T <: AbstractFloat}
     y::Vector{T}
     residuals::Vector{T}
     invXhatXhat::Matrix{T}
-    n_endogenous::Int
+    endo_cols::Vector{Int}
+    weights::Vector{T}
 end
+
+# The exogenous columns of `X` and the number of them, which lead the columns of `Z`.
+_exo_cols(pe::PostEstimationDataIVMatrix) = setdiff(axes(pe.X, 2), pe.endo_cols)
 
 """
     IVMatrixEstimator{T, E, V, C} <: AbstractRegressModel
@@ -1471,6 +1412,7 @@ Designed for programmatic use (e.g., LocalProjections.jl).
 - `fe_groups::Vector{Vector{Int}}`: Group codes of each absorbed fixed effect (empty
   without fixed effects)
 - `fe_ngroups::Vector{Int}`: Number of levels of each absorbed fixed effect
+- `esample::BitVector`: Which rows of the input are in the estimation sample
 - `vcov_estimator::V`: Variance estimator used
 - `vcov_matrix::C`: Precomputed variance-covariance matrix
 - `se::Vector{T}`: Standard errors
@@ -1502,6 +1444,7 @@ struct IVMatrixEstimator{T <: AbstractFloat, E <: AbstractIVEstimator, V,
     coefnames::Vector{String}
     fe_groups::Vector{Vector{Int}}
     fe_ngroups::Vector{Int}
+    esample::BitVector
 
     # Variance-covariance
     vcov_estimator::V
@@ -1515,7 +1458,7 @@ _estimator_name(m::IVMatrixEstimator) = _estimator_name(m.estimator)
 
 has_iv(::IVMatrixEstimator) = true
 has_fe(m::IVMatrixEstimator) = !isempty(m.fe_groups)
-dof_fes(m::IVMatrixEstimator) = sum(m.fe_ngroups; init = 0)
+dof_fes(m::IVMatrixEstimator) = _fe_dof(m.fe_ngroups, length(m.fe_ngroups))
 model_hasintercept(m::IVMatrixEstimator) = m.has_intercept
 
 ##############################################################################
@@ -1542,7 +1485,8 @@ function StatsAPI.response(m::IVMatrixEstimator)
 end
 
 function StatsAPI.residuals(m::IVMatrixEstimator)
-    return m.postestimation.residuals
+    pe = m.postestimation
+    return isempty(pe.weights) ? pe.residuals : pe.residuals ./ sqrt.(pe.weights)
 end
 
 function StatsAPI.fitted(m::IVMatrixEstimator)
@@ -1610,12 +1554,8 @@ end
 # over-identified TSLS it differs from diag(X̂(X̂'X̂)⁻¹X̂'), so HC2/HC3 need it to
 # match the formula path.
 function StatsAPI.leverage(m::IVMatrixEstimator{T, TSLS}) where {T <: AbstractFloat}
-    X = m.postestimation.X
-    Z = m.postestimation.Z
-    invXhatXhat = m.postestimation.invXhatXhat
-    invZZ = inv(cholesky(Symmetric(Z' * Z)))
-    Pz = Z * (invZZ * Z')
-    return vec(sum((X * invXhatXhat) .* (Pz * X), dims = 2))
+    pe = m.postestimation
+    return _tsls_leverage(pe.X, pe.X_hat, pe.invXhatXhat)
 end
 
 # CovarianceMatrices.jl uses numobs, which is distinct from StatsAPI.nobs
@@ -1650,7 +1590,7 @@ function _regress_aVar(k::_CM.CR, m::IVMatrixEstimator; demean = false, prewhite
     X_hat = m.postestimation.X_hat
     u = m.postestimation.residuals
     if k isa Union{_CM.CR2, _CM.CR3}
-        return _leverage_aVar(k, X_hat, X_hat, bread(m), u, similar(u, 0);
+        return _leverage_aVar(k, X_hat, X_hat, bread(m), u, m.postestimation.weights;
             demean, prewhite, scale)
     end
     return _moment_aVar(k, X_hat .* u; demean, prewhite, scale)
@@ -1727,6 +1667,7 @@ function Base.:+(m::IVMatrixEstimator{T, E, V1}, v::VcovSpec{V2}) where {T, E, V
         m.coefnames,
         m.fe_groups,
         m.fe_ngroups,
+        m.esample,
         v.source,
         new_vcov,
         new_se,
@@ -1738,6 +1679,11 @@ end
 ##############################################################################
 ## first_stage for IVMatrixEstimator
 ##############################################################################
+
+# One OLS fit of each column of `Xendo` on `Z`.
+function _matrix_first_stage_fits(Z, Xendo, has_intercept, fe, coefnames)
+    return [ols(Z, Xendo[:, i]; has_intercept, fe, coefnames) for i in axes(Xendo, 2)]
+end
 
 """
     first_stage(m::IVMatrixEstimator; endogenous_names=nothing, instrument_names=nothing) -> FirstStageIV
@@ -1772,42 +1718,41 @@ function first_stage(m::IVMatrixEstimator{T};
         endogenous_names::Union{Vector{String}, Nothing} = nothing,
         instrument_names::Union{Vector{String}, Nothing} = nothing) where {T}
     pe = m.postestimation
-    n_endo = pe.n_endogenous
+    n_endo = length(pe.endo_cols)
     n_endo > 0 || throw(ArgumentError("Model has no endogenous variables."))
 
+    exo_cols = _exo_cols(pe)
     X = pe.X
     Z = pe.Z
     S = nobs(m)
-    k_total = size(X, 2)
-    k_exo = k_total - n_endo
+    k_exo = length(exo_cols)
     K = size(Z, 2) - k_exo  # number of excluded instruments
 
-    Xendo = X[:, (k_exo + 1):end]
+    Xendo = X[:, pe.endo_cols]
     Z_instr = Z[:, (k_exo + 1):end]
 
     # Default names
+    estimated_names = coefnames(m)[m.basis_coef]
     endo_names = endogenous_names === nothing ?
-                 coefnames(m)[(k_exo + 1):end] : endogenous_names
+                 estimated_names[pe.endo_cols] : endogenous_names
     instr_names = instrument_names === nothing ?
                   ["inst_$i" for i in 1:K] : instrument_names
     length(endo_names) == n_endo || throw(DimensionMismatch(
         "endogenous_names has $(length(endo_names)) names but the model has $n_endo endogenous variables"))
     length(instr_names) == K || throw(DimensionMismatch(
         "instrument_names has $(length(instr_names)) names but the model has $K excluded instruments"))
-    fs_names = vcat(coefnames(m)[1:k_exo], instr_names)
+    fs_names = vcat(estimated_names[exo_cols], instr_names)
 
     # Step 1: Run first-stage OLS regressions (xendo_j on full Z)
     # On a model with absorbed fixed effects, X and Z are already demeaned; passing the
     # groups again makes the first-stage fits count the absorbed levels.
-    fe = has_fe(m) ? Tuple(m.fe_groups) : nothing
-    fs_models = [ols(Z, Xendo[:, i]; has_intercept = m.has_intercept, fe,
-                     coefnames = fs_names)
-                 for i in 1:n_endo]
+    fs_models = _matrix_first_stage_fits(Z, Xendo, m.has_intercept,
+        has_fe(m) ? m.fe_groups : nothing, fs_names)
 
     # Step 2: Compute residualized data for F-statistics
     # Partial out exogenous regressors from excluded instruments and endogenous
     if k_exo > 0
-        Xexo = X[:, 1:k_exo]
+        Xexo = X[:, exo_cols]
         QR_exo = qr(Xexo)
         Q_exo = Matrix(QR_exo.Q)
         Z_res = Z_instr .- Q_exo * (Q_exo' * Z_instr)
@@ -1877,7 +1822,7 @@ function Base.show(io::IO, ::MIME"text/plain", m::IVMatrixEstimator{T}) where {T
     println(io, "Parameters:        $(dof(m))")
     println(io, "R²:                $(round(r2(m), digits=4))")
     println(io, "Residual DoF:      $(dof_residual(m))")
-    println(io, "Endogenous vars:   $(m.postestimation.n_endogenous)")
+    println(io, "Endogenous vars:   $(length(m.postestimation.endo_cols))")
     println(io)
     println(io, "Coefficients:")
     cc = coef(m)

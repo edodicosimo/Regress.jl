@@ -285,7 +285,7 @@ end
     df.Price_zero[1] = 0.0
     m = @formula Sales ~ log(Price_zero)
     @test_throws ArgumentError Regress.ols(df, m)
-    @test_throws "Some observations for the exogenous variables are infinite" Regress.ols(df, m)
+    @test_throws "Some observations for the exogenous variables are not finite" Regress.ols(df, m)
 end
 
 @testitem "OLS collinearity" tags = [:ols] begin

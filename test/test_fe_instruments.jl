@@ -172,14 +172,12 @@ end
     # Coefficients should still match
     @test coef(model_std_hc3) ≈ coef(model_fe_hc3) rtol=1e-4
 
-    # HC3 standard errors should match
-    # SKIP: FE-based instruments use different Z matrix for leverage computation
-    # Fixing this would require constructing full dummy matrix, defeating the purpose
-    # of using FE-based instruments for high-dimensional problems
-    @test_skip stderror(model_std_hc3) ≈ stderror(model_fe_hc3) rtol=1e-4
+    # HC3 standard errors should match: the leverage uses the first-stage fit, which
+    # covers the fixed effects used as instruments
+    @test stderror(model_std_hc3) ≈ stderror(model_fe_hc3) rtol=1e-4
 
     # HC3 vcov should match
-    @test_skip vcov(model_std_hc3) ≈ vcov(model_fe_hc3) rtol=1e-4
+    @test vcov(model_std_hc3) ≈ vcov(model_fe_hc3) rtol=1e-4
 end
 
 @testitem "FE-based instruments - confidence intervals" tags = [:iv, :fe] begin
