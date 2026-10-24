@@ -22,3 +22,8 @@ jobs:
         with:
           julia-version: '1'
           tune: 'false'
+          # The pull request's own script, run on both revisions. Passing it explicitly
+          # also keeps benchmark/Project.toml (CUDA, MKL, RCall, ... for the other
+          # scripts in benchmark/) out of the environment.
+          script: benchmark/benchmarks.jl
+          extra-pkgs: BenchmarkTools,CovarianceMatrices,DataFrames,StableRNGs
