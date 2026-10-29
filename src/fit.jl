@@ -563,7 +563,7 @@ See [`glmfe`](@ref) for the convergence criterion and fitting details.
 """
 function probit(@nospecialize(df), formula::FormulaTerm;
         beta0 = nothing, max_iter = 100, tolerance = 1e-6)
-    return glmfe(formula, df; link=ProbitLink(), beta0, max_iter, tolerance)
+    return glmfe(formula, df; link = ProbitLink(), beta0, max_iter, tolerance)
 end
 
 """
@@ -590,6 +590,6 @@ m = glmfe(@formula(y ~ x + fe(id)), data; link=LogitLink())
 `probit(data, formula; kwargs...)` remains available as a compatibility wrapper.
 """
 function glmfe(formula::FormulaTerm, @nospecialize(data);
-        link=ProbitLink(), beta0=nothing, max_iter=100, tolerance=1e-6)
+        link = ProbitLink(), beta0 = nothing, max_iter = 100, tolerance = 1e-6)
     return fit_glmfe(data, formula, beta0, max_iter, tolerance, link)
 end

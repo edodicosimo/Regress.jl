@@ -137,8 +137,6 @@ function GLMWorkspace(X::Matrix{T}) where {T <: AbstractFloat}
         M, cols, Vector{T}(undef, n))
 end
 
-
-
 ############################################################
 ### IRLS workspace
 ############################################################
@@ -251,7 +249,7 @@ function _glm_irls!(m::BinaryEstimator, ws::GLMWorkspace, feM, has_fes::Bool,
         rr.resid .= rr.y .- rr.mu
         ws.g .= rr.resid
         ws.d .= rr.dmu_deta
-        ws.h .= ws.d.^2 ./ (rr.mu .* rr.one_minus_mu)
+        ws.h .= ws.d .^ 2 ./ (rr.mu .* rr.one_minus_mu)
 
         # Working response, and the absorption buffer holding [z | X].
         ws.z .= rr.eta .+ ws.g ./ ws.d
@@ -434,8 +432,6 @@ function refresh_response!(rr::BinaryResponse{T}, X, beta, alpha) where {T}
     return sum(rr.deviance_contributions)
 end
 
-
-
 """
     stephalving!(m::BinaryEstimator, alpha)
 
@@ -475,7 +471,6 @@ function update_response!(m, alpha)
     stephalving!(m, alpha)
 end
 
-
 """
     inverse_link!(rr::BinaryResponse{T, ProbitLink}) -> rr
 
@@ -507,7 +502,6 @@ function inverse_link!(rr::BinaryResponse{T, LogitLink}) where {T}
     return rr
 end
 
-
 """
     link_probit(mu) -> eta
 
@@ -529,7 +523,6 @@ respectively. Use `log1p(-mu)` to evaluate the logarithm of the complement.
 function link_logit(mu)
     return log(mu) - log1p(-mu)
 end
-
 
 """
     var_bernoulli(rr) -> variances

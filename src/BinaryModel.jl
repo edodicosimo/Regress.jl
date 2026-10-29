@@ -84,7 +84,7 @@ residuals and Bernoulli deviance contributions.
 Set `deviance` to their sum and initialize `deviance_new` to zero. Allocate
 `wts` and `offset` without initializing or using them.
 """
-function BinaryResponse(yi, pp::BinaryPredictorQR, responsename, link::Link=ProbitLink())
+function BinaryResponse(yi, pp::BinaryPredictorQR, responsename, link::Link = ProbitLink())
     T = eltype(pp.beta)
     yi = T.(yi)
     eta = pp.X * pp.beta
@@ -122,7 +122,8 @@ Bernoulli model storage used by `glmfe` for probit and logit fitting. Combine a
 A returned model can represent either a converged fit or the last iterate
 at the iteration limit. The concrete response type preserves its link parameter for specialization.
 """
-mutable struct BinaryEstimator{T <: AbstractFloat, R <: BinaryResponse{T}} <: AbstractRegressModel
+mutable struct BinaryEstimator{T <: AbstractFloat, R <: BinaryResponse{T}} <:
+               AbstractRegressModel
     rr::R
     pp::BinaryPredictorQR{T}
 
