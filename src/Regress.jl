@@ -84,7 +84,7 @@ include("partial_out.jl")
 
 # Probit
 include("BinaryModel.jl")  # Binary-response model structs and StatsAPI surface
-include("fit_probit.jl")   # IRLS probit fit
+include("fit_probit.jl")   # Shared Bernoulli Fisher-scoring fit
 
 # Main estimation functions
 public ols, iv, fe, probit, partial_out
@@ -117,6 +117,7 @@ export weakivtest, WeakIVTestResult
 export wu_hausman, sargan
 export WuHausmanResult, SarganResult
 
+export glmfe, ProbitLink, LogitLink
 export fit_probit, BinaryEstimator
 
 # Re-export StatsAPI functions for user convenience

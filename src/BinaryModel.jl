@@ -5,30 +5,38 @@ import StatsAPI: coef, coefnames, coeftable, confint, deviance,
 using Printf: @sprintf
 
 # ── Response ─────────────────────────────────────────────────────────────────
+"""Abstract supertype for binary-response link functions supported by `glmfe`."""
+abstract type Link end
 
+"""Standard normal CDF inverse link for Bernoulli probit regression."""
+struct ProbitLink <: Link end
+"""Logistic inverse link for Bernoulli logistic regression."""
+struct LogitLink <: Link end
 """
-    BinaryResponse{T <: AbstractFloat}
+    BinaryResponse{T <: AbstractFloat, L <: Link}
 
-Working storage for binary model response. Holds observed data, fitted values,
-and per-observation residuals, inverse-link derivatives, and deviance contributions.
+Working storage for a binary response and its current predictor evaluation.
 
 # Fields
-- `y`: observed binary response vector
-- `v`: per-observation `(y - mu, dmu_deta, deviance)` tuples
-- `deviance`, `deviance_new`: current and candidate deviance (convergence check)
-- `eta`: linear predictor 
-- `mu`: fitted probabilities (inverse-link of η)
-- `dmu_deta`: inverse-link derivatives
-- `resid`: response residuals `y - mu`
-- `deviance_contributions`: per-observation deviance contributions
-- `wts`: observation weights
-- `offset`: optional offset vector (empty = no offset)
-- `response_name`: symbol name of the response variable
+- `link`: concrete link instance selecting inverse-link dispatch.
+- `y`: observed binary response vector.
+- `deviance`: accepted total deviance used as the step-halving reference.
+- `deviance_new`: candidate total deviance.
+- `eta`: linear predictor, including the fixed-effect contribution after refresh.
+- `mu`: fitted probabilities.
+- `one_minus_mu`: complementary probabilities computed directly by the inverse link.
+- `dmu_deta`: inverse-link derivatives.
+- `resid`: response residuals `y - mu`.
+- `deviance_contributions`: deviance contribution of each observation.
+- `wts`, `offset`: reserved buffers, currently unused and uninitialized.
+- `response_name`: response variable name as a symbol.
+
+During a candidate evaluation, vector fields describe the candidate while
+`deviance` retains the accepted reference value.
 """
-mutable struct BinaryResponse{T <: AbstractFloat}
-    # model::Union(Link(),Distribution())
+mutable struct BinaryResponse{T <: AbstractFloat, L <: Link}
+    link::L
     y::Vector{T}
-    v::Vector{Tuple{T, T, T}}
     deviance::T
     deviance_new::T
     eta::Vector{T}
@@ -43,7 +51,7 @@ mutable struct BinaryResponse{T <: AbstractFloat}
 end
 
 function StatsAPI.deviance(rr::BinaryResponse)
-    return sum(t -> t[3], rr.v)
+    return sum(rr.deviance_contributions)
 end
 
 # ── Predictor ─────────────────────────────────────────────────────────────────
@@ -66,21 +74,24 @@ mutable struct BinaryPredictorQR{T <: AbstractFloat}
 end
 
 """
-    BinaryResponse(yi, pp::BinaryPredictorQR, responsename) -> BinaryResponse
+    BinaryResponse(yi, pp::BinaryPredictorQR, responsename, link::Link=ProbitLink()) -> BinaryResponse
 
-Construct a `BinaryResponse` from initial response vector `yi`, predictor `pp`,
-and the response variable name. Computes the initial linear predictor `eta`,
-fitted probabilities, residuals, inverse-link derivatives, and deviance.
+Convert the binary response to the coefficient element type and initialize
+`eta = pp.X * pp.beta` without a fixed-effect contribution. Use the selected
+inverse link to fill probabilities, complements, and derivatives, then compute
+residuals and Bernoulli deviance contributions.
+
+Set `deviance` to their sum and initialize `deviance_new` to zero. Allocate
+`wts` and `offset` without initializing or using them.
 """
-function BinaryResponse(yi, pp::BinaryPredictorQR, responsename)
+function BinaryResponse(yi, pp::BinaryPredictorQR, responsename, link::Link=ProbitLink())
     T = eltype(pp.beta)
     yi = T.(yi)
     eta = pp.X * pp.beta
     mu = similar(yi)
-    v = Vector{Tuple{T, T, T}}(undef, length(yi))
     rr = BinaryResponse(
+        link,
         yi,
-        v,
         zero(T),
         zero(T),
         eta,
@@ -93,10 +104,9 @@ function BinaryResponse(yi, pp::BinaryPredictorQR, responsename)
         similar(yi), # offset
         responsename
     )
-    inverse_link_probit!(rr)
+    inverse_link!(rr)
     rr.resid .= rr.y .- rr.mu
     rr.deviance_contributions .= deviance_bernoulli.(rr.y, rr.mu, rr.one_minus_mu)
-    rr.v .= tuple.(rr.resid, rr.dmu_deta, rr.deviance_contributions)
     rr.deviance = sum(rr.deviance_contributions)
     return rr
 end
@@ -104,14 +114,16 @@ end
 # ── Fitted model ──────────────────────────────────────────────────────────────
 
 """
-    BinaryEstimator{T <: AbstractFloat}
+    BinaryEstimator{T <: AbstractFloat, R <: BinaryResponse{T}}
 
-Fitted binary regression model (e.g. probit, logit). Combines a `BinaryResponse`
-and `BinaryPredictorQR` with formula metadata and summary statistics produced
-after IRLS convergence.
+Bernoulli model storage used by `glmfe` for probit and logit fitting. Combine a
+`BinaryResponse`, a `BinaryPredictorQR`, formula metadata, and parameter counts.
+
+A returned model can represent either a converged fit or the last iterate
+at the iteration limit. The concrete response type preserves its link parameter for specialization.
 """
-mutable struct BinaryEstimator{T <: AbstractFloat} <: AbstractRegressModel
-    rr::BinaryResponse{T}
+mutable struct BinaryEstimator{T <: AbstractFloat, R <: BinaryResponse{T}} <: AbstractRegressModel
+    rr::R
     pp::BinaryPredictorQR{T}
 
     formula::FormulaTerm
@@ -129,6 +141,11 @@ mutable struct BinaryEstimator{T <: AbstractFloat} <: AbstractRegressModel
 
     coefnames::Vector{String}
     basis_coef::BitVector
+end
+
+# Preserve construction with only the numeric type specified.
+function BinaryEstimator{T}(rr::R, args...) where {T, R <: BinaryResponse{T}}
+    return BinaryEstimator{T, R}(rr, args...)
 end
 
 has_iv(::BinaryEstimator) = false

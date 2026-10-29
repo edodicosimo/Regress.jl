@@ -1,6 +1,6 @@
 @testitem "Probit Fisher weights and working response" tags = [:probit] begin
     using Regress, DataFrames
-    using Regress: fit_probit, ProbitWorkspaceForFS, BinaryResponse, _probit_irls!
+    using Regress: fit_probit, GLMWorkspace, BinaryResponse, _glm_irls!
     using StatsAPI: deviance
 
     df = DataFrame(x = repeat([-1.0, 0.0, 1.0], inner = 4),
@@ -14,10 +14,10 @@
     @test m.rr.resid ≈ df.y .- 0.5
     @test m.rr.dmu_deta ≈ fill(inv(sqrt(2pi)), length(df.y))
     @test m.rr.deviance_contributions ≈ fill(2log(2), length(df.y))
-    ws = ProbitWorkspaceForFS(m.pp.X)
-    @test ws isa ProbitWorkspaceForFS
+    ws = GLMWorkspace(m.pp.X)
+    @test ws isa GLMWorkspace
 
-    _probit_irls!(m, ws, nothing, false, 1, 1e-10)
+    _glm_irls!(m, ws, nothing, false, 1, 1e-10)
 
     # At eta = 0, mu = 1/2 and phi(eta) = 1/sqrt(2pi).
     derivative = inv(sqrt(2pi))
@@ -34,7 +34,7 @@
     @test m.rr.one_minus_mu ≈ fill(Regress.normcdf(-0.5), length(df.y))
     @test m.rr.resid ≈ m.rr.y .- m.rr.mu
     @test m.rr.dmu_deta ≈ fill(exp(-0.5^2 / 2) / sqrt(2pi), length(df.y))
-    @test m.rr.v == tuple.(m.rr.resid, m.rr.dmu_deta, m.rr.deviance_contributions)
+    @test deviance(m.rr) ≈ candidate_deviance
     @test candidate_deviance ≈ sum(m.rr.deviance_contributions)
     @test m.rr.deviance == accepted_deviance
 end

@@ -5,12 +5,11 @@
     select_columns(df::DataFrame, formula::FormulaTerm)
         -> (schema, formula_schema, data, X_without_fe, y)
 
-Parse `formula` against `df` and return:
-- `schema`: the `StatsModels` schema
-- `formula_schema`: the schema-applied formula
-- `data`: `DataFrame` containing only the columns referenced by `formula`
-- `X_without_fe`: model matrix with `fe(...)` terms excluded
-- `y`: response vector
+Build model columns and formula metadata from `df`. Return the schema and
+schema-applied formula after converting standalone `fe(...)` terms to ordinary
+terms, a DataFrame reconstructed from the response and model columns, the
+`Matrix{Float64}` design excluding standalone fixed-effect terms, and the
+response vector. The returned DataFrame is not a direct subset of `df`.
 """
 function select_columns(df::DataFrame, formula::FormulaTerm)
     formula_without_fe = remove_fixedeffects(formula)
@@ -101,7 +100,24 @@ end
 ############################################################
 ### IRLS workspace for Fisher Scoring
 ############################################################
-struct ProbitWorkspaceForFS{T <: AbstractFloat, C <: AbstractVector{T}}
+"""
+    GLMWorkspace(X::Matrix{T})
+
+Allocate buffers for Bernoulli Fisher scoring with `n` observations and `k`
+design columns. Buffers are uninitialized until filled by the fitting loop.
+
+- `g`: response residuals `y - mu`.
+- `d`: inverse-link derivatives `dmu_deta`.
+- `h`: Fisher weights `d^2 / (mu * one_minus_mu)`.
+- `z`: working response `eta + g / d`.
+- `M`: shared `n × (k + 1)` absorption buffer containing `[z X]`.
+- `cols`: views of the columns of `M` for the fixed-effect solver.
+- `resid`: temporary storage for recovering fixed-effect contributions;
+  unlike `rr.resid`, this is not the response residual vector.
+
+All vector buffers have length `n`. Arithmetic in the formulas is elementwise.
+"""
+struct GLMWorkspace{T <: AbstractFloat, C <: AbstractVector{T}}
     g::Vector{T}       # response residual y - mu
     d::Vector{T}       # inverse-link derivative dmu_deta
     h::Vector{T}       # Fisher weights dmu_deta^2 / Var(y)
@@ -111,12 +127,12 @@ struct ProbitWorkspaceForFS{T <: AbstractFloat, C <: AbstractVector{T}}
     resid::Vector{T}   # z - Xβ, input to the fixed-effect contribution recovery
 end
 
-function ProbitWorkspaceForFS(X::Matrix{T}) where {T <: AbstractFloat}
+function GLMWorkspace(X::Matrix{T}) where {T <: AbstractFloat}
     n, k = size(X)
     M = Matrix{T}(undef, n, k + 1)
     C = typeof(view(M, :, 1))
     cols = C[view(M, :, j) for j in 1:(k + 1)]
-    return ProbitWorkspaceForFS{T, C}(
+    return GLMWorkspace{T, C}(
         Vector{T}(undef, n), Vector{T}(undef, n), Vector{T}(undef, n), Vector{T}(undef, n),
         M, cols, Vector{T}(undef, n))
 end
@@ -129,9 +145,9 @@ end
 """
     ProbitWorkspace{T, C}
 
-Preallocated buffers reused across IRLS iterations so that the inner loop makes
-no per-iteration allocations for the working response, weights, or demeaned
-design.
+Legacy workspace for score/observed-information updates, with working response
+`eta + g / h`. The current `probit` fitting path uses `GLMWorkspace`
+instead. Buffers are allocated once and are initially uninitialized.
 
 The working response and design columns to be absorbed share a single
 `(n × (k+1))` buffer `M`: column 1 holds the working response, columns `2:k+1`
@@ -158,19 +174,22 @@ function ProbitWorkspace(X::Matrix{T}) where {T <: AbstractFloat}
 end
 
 # Views onto the working response and the absorbed design within the shared buffer.
-zbuf(ws::Union{ProbitWorkspace, ProbitWorkspaceForFS}) = view(ws.M, :, 1)
-Xdbuf(ws::Union{ProbitWorkspace, ProbitWorkspaceForFS}) = view(ws.M, :, 2:size(ws.M, 2))
+zbuf(ws::Union{ProbitWorkspace, GLMWorkspace}) = view(ws.M, :, 1)
+Xdbuf(ws::Union{ProbitWorkspace, GLMWorkspace}) = view(ws.M, :, 2:size(ws.M, 2))
 
 ############################################################
 ### Weighted least squares on the absorbed design
 ############################################################
 """
-    wls_absorbed!(beta, Xd, z, h) -> beta
+    wls_absorbed!(beta, Xd, z, h, basis) -> beta
 
-Solve the weighted least-squares problem `min_β Σ hᵢ (zᵢ - Xdᵢ'β)²` on the
-FE-absorbed design `Xd` and working response `z`, writing the coefficients into
-`beta`. Columns of `Xd` that are collinear with the fixed effects have already
-been zeroed by the caller, so their coefficients come back as zero.
+Solve `min_β Σ hᵢ (zᵢ - Xdᵢ'β)²` and write the coefficients into `beta`.
+`Xd` and `z` must already have fixed effects absorbed, if applicable.
+`basis` selects retained columns; excluded coefficients are set to zero.
+
+Form the weighted normal equations and solve them with Cholesky factorization.
+The retained system must be positive definite. This function allocates temporary
+weighted arrays and normal-equation buffers; it does not perform absorption.
 """
 function wls_absorbed!(beta::Vector{T}, Xd::AbstractMatrix{T}, z::AbstractVector{T},
         h::Vector{T}, basis::BitVector) where {T <: AbstractFloat}
@@ -194,16 +213,24 @@ function wls_absorbed!(beta::Vector{T}, Xd::AbstractMatrix{T}, z::AbstractVector
 end
 
 """
-    _probit_irls!(m, ws, feM, has_fes, max_iter, tolerance) -> basis
+    _glm_irls!(m, ws, feM, has_fes, max_iter, tolerance) -> basis
 
-Run the IRLS loop in place on the model `m`, using the preallocated workspace
-`ws` and (optionally) the fixed-effect solver `feM`. Returns the basis mask of
-slope columns that survive fixed-effect absorption.
+Run Bernoulli Fisher scoring in place using `GLMWorkspace` and the optional
+fixed-effect solver `feM`. At each iteration, form the working response
+`z = eta + (y - mu) / dmu_deta` and weights
+`h = dmu_deta^2 / (mu * one_minus_mu)`, elementwise.
 
-A separate function from `fit_probit` so the hot loop specializes on the
-concrete types of `ws` and `feM`.
+Absorb fixed effects when present, solve weighted least squares, recover the
+fixed-effect contribution, and update the response with step-halving.
+Stop when `abs(Dnew - Dold) / (0.1 + abs(Dnew)) < tolerance` or after
+`max_iter` iterations. Reaching the iteration limit does not signal an error.
+
+Return a Boolean mask of retained design columns. Columns nearly annihilated
+by fixed-effect absorption are detected on the first iteration and excluded
+thereafter; without fixed effects the mask contains only `true` values.
+The separate function permits specialization on workspace and solver types.
 """
-function _probit_irls!(m::BinaryEstimator, ws::ProbitWorkspaceForFS, feM, has_fes::Bool,
+function _glm_irls!(m::BinaryEstimator, ws::GLMWorkspace, feM, has_fes::Bool,
         max_iter::Integer, tolerance::Real)
     rr = m.rr
     pp = m.pp
@@ -220,7 +247,7 @@ function _probit_irls!(m::BinaryEstimator, ws::ProbitWorkspaceForFS, feM, has_fe
     Xd = Xdbuf(ws)
 
     for _ in 1:max_iter
-        inverse_link_probit!(rr)
+        inverse_link!(rr)
         rr.resid .= rr.y .- rr.mu
         ws.g .= rr.resid
         ws.d .= rr.dmu_deta
@@ -286,46 +313,42 @@ function _probit_irls!(m::BinaryEstimator, ws::ProbitWorkspaceForFS, feM, has_fe
 end
 
 ############################################################
-### FIT PROBIT
+### FIT BERNOULLI GLM
 ############################################################
 """
-    fit_probit(data, formula, beta0, max_iter, tolerance) -> BinaryEstimator
+    fit_glmfe(data::DataFrame, formula, beta0, max_iter, tolerance, link) -> BinaryEstimator
 
-Estimate a binary-response probit model, optionally absorbing fixed effects
-specified with `fe(...)` terms in `formula`.
+Fit a Bernoulli model with the selected probit or logit link by Fisher scoring,
+optionally absorbing fixed effects specified by `fe(...)` terms. The response must contain only zeros
+and ones. Data preparation currently requires a `DataFrame`.
 
-The estimator uses Fisher scoring via iteratively reweighted least squares.
-Each iteration forms the working response and weights from the response residual,
-inverse-link derivative, and Bernoulli variance,
-absorbs the fixed effects from both the working response and the design, solves
-the weighted least-squares update for the slope coefficients, and recovers the
-fixed-effect contribution to the linear predictor. Step-halving guards against
-deviance increases.
-
-The fixed-effect solver and the working buffers are constructed once and reused
-across iterations; only the observation weights are refreshed each iteration.
+Each iteration forms working responses and Fisher weights, absorbs fixed
+effects, solves weighted least squares, and recovers the fixed-effect
+contribution. Workspace buffers and the fixed-effect solver are reused;
+solver weights are updated each iteration. Step-halving attempts to reduce
+the deviance, with at most 26 halvings per update.
 
 # Arguments
-- `data`: Input table containing the response, regressors, and fixed-effect
-  variables.
-- `formula::FormulaTerm`: A `StatsModels.jl` formula, for example
-  `@formula(y ~ x1 + x2 + fe(group))`.
-- `beta0::Union{Nothing, Vector}`: Initial coefficient vector for the
-  non-fixed-effect regressors, or `nothing` for a zero start.
-- `max_iter::Integer`: Maximum number of IRLS iterations.
-- `tolerance::Real`: Convergence tolerance for the relative deviance change.
+- `link`: `ProbitLink()` or `LogitLink()`.
+- `data`: DataFrame containing the response, regressors, and fixed-effect variables.
+- `formula`: Model formula, for example `@formula(y ~ x + fe(group))`.
+- `beta0`: Initial coefficient vector, or `nothing` for zeros. Its length must
+  match the design columns, including the intercept added without fixed effects.
+- `max_iter`: Maximum number of Fisher-scoring iterations.
+- `tolerance`: Threshold for `abs(Dnew - Dold) / (0.1 + abs(Dnew))`.
 
-# Returns
-- `BinaryEstimator`: Fitted model containing the response, fitted
-  probabilities, coefficient estimates, model matrix, formula, and coefficient
-  names.
+Without fixed effects, an explicit intercept is prepended to the design.
+With fixed effects, the constant is absorbed. Return a `BinaryEstimator` with
+coefficients, response buffers, formula metadata, and parameter counts.
+The last iterate is returned even when the iteration limit is reached.
 """
-function fit_probit(
+function fit_glmfe(
         @nospecialize(data),
         formula::FormulaTerm,
         beta0::Union{Nothing, Vector},
         max_iter::Integer,
-        tolerance::Real)
+        tolerance::Real,
+        link::Link)
     schema, formula_schema, data, X, y = select_columns(data, formula)
 
     response_name, coef_names_str = get_coefficient_names_nofe(formula, data)
@@ -352,7 +375,7 @@ function fit_probit(
 
     pp = BinaryPredictorQR{Float64}(X, beta0, similar(beta0))
 
-    rr = BinaryResponse(y, pp, response_name)
+    rr = BinaryResponse(y, pp, response_name, link)
 
     m = BinaryEstimator{Float64}(
         rr,
@@ -374,11 +397,11 @@ function fit_probit(
     ###############################################
     ############ ESTIMATION LOOP ##################
     ###############################################
-    ws = ProbitWorkspaceForFS(X)
+    ws = GLMWorkspace(X)
     # Build the fixed-effect solver once; only its weights change per iteration.
     feM = has_fes ?
           AbstractFixedEffectSolver{Float64}(fes, Weights(ones(n)), Val{:cpu}) : nothing
-    basis = _probit_irls!(m, ws, feM, has_fes, max_iter, tolerance)
+    basis = _glm_irls!(m, ws, feM, has_fes, max_iter, tolerance)
 
     ################################
     ## Summary statistics
@@ -389,24 +412,26 @@ function fit_probit(
     m.n_parameters = sum(basis)
     m.fixed_effects_dof = dof_fes
 
-    rr.mu = normcdf.(rr.eta)
     return m
 end
 
 """
     refresh_response!(rr, X, beta, alpha) -> deviance
 
-Recompute the linear predictor `rr.eta = X·β + α` and the per-observation
-residuals, derivatives, and deviance contributions `rr.v` in place, and return the deviance. Performs
-no allocations beyond the reused buffers.
+Set `rr.eta = X * beta + alpha`, then update `mu`, `one_minus_mu`,
+`dmu_deta`, `resid`, and `deviance_contributions` using the selected inverse link
+and Bernoulli deviance. Reuse the response buffers and return the sum of the
+per-observation deviance contributions.
+
+Do not assign `rr.deviance` or `rr.deviance_new`; the caller stores the returned
+value so an accepted deviance remains available during candidate evaluation.
 """
 function refresh_response!(rr::BinaryResponse{T}, X, beta, alpha) where {T}
     mul!(rr.eta, X, beta)
     rr.eta .+= alpha
-    inverse_link_probit!(rr)
+    inverse_link!(rr)
     rr.resid .= rr.y .- rr.mu
     rr.deviance_contributions .= deviance_bernoulli.(rr.y, rr.mu, rr.one_minus_mu)
-    rr.v .= tuple.(rr.resid, rr.dmu_deta, rr.deviance_contributions)
     return sum(rr.deviance_contributions)
 end
 
@@ -415,9 +440,13 @@ end
 """
     stephalving!(m::BinaryEstimator, alpha)
 
-Apply step-halving to ensure the deviance does not increase. Repeatedly bisects
-the step from `pp.beta` to `pp.beta_new` (up to 26 halvings) until
-`rr.deviance_new ≤ rr.deviance`.
+While the candidate deviance exceeds the accepted deviance, replace
+`pp.beta_new` with its midpoint with `pp.beta` and refresh the response.
+Keep the supplied fixed-effect contribution `alpha` fixed.
+
+Attempt at most 26 halvings. Update the candidate coefficients, response
+buffers, and `rr.deviance_new`, leaving `pp.beta` and `rr.deviance` unchanged.
+A non-increasing deviance is not guaranteed if the halving limit is reached.
 """
 function stephalving!(m::BinaryEstimator, alpha)
     rr = m.rr
@@ -433,10 +462,12 @@ end
 """
     update_response!(m, alpha)
 
-Update the response object after a predictor step. Recomputes `rr.eta` using
-`pp.beta_new` and the fixed-effect contribution `alpha`, refreshes the
-residuals, derivatives, and deviance contributions `rr.v` and `rr.deviance_new`, then calls
-`stephalving!` if needed to enforce a deviance decrease.
+Evaluate `pp.beta_new` with the supplied fixed-effect contribution `alpha`.
+Refresh the linear predictor, probabilities, derivative, residuals, and
+per-observation deviance contributions, and store their sum in `rr.deviance_new`.
+
+Call `stephalving!`, which attempts up to 26 halvings if the deviance increases.
+Leave acceptance of the candidate coefficients and deviance to the caller.
 """
 function update_response!(m, alpha)
     rr = m.rr
@@ -447,13 +478,13 @@ end
 
 
 """
-    inverse_link_probit!(rr) -> rr
+    inverse_link!(rr::BinaryResponse{T, ProbitLink}) -> rr
 
 Update `rr.mu`, `rr.one_minus_mu`, and `rr.dmu_deta` from `rr.eta` in place.
 Use the standard normal CDF, complementary CDF, and PDF, respectively.
 The complementary CDF avoids cancellation when `mu` is close to one.
 """
-function inverse_link_probit!(rr::BinaryResponse)
+function inverse_link!(rr::BinaryResponse{T, ProbitLink}) where {T}
     rr.mu .= normcdf.(rr.eta)
     rr.one_minus_mu .= StatsFuns.normccdf.(rr.eta)
     rr.dmu_deta .= exp.(normlogpdf.(rr.eta))
@@ -461,23 +492,26 @@ function inverse_link_probit!(rr::BinaryResponse)
 end
 
 """
-    inverse_link_logit(eta) -> (mu, one_minus_mu, dmu_deta)
+    inverse_link!(rr::BinaryResponse{T, LogitLink}) -> rr
 
-Evaluate the logit inverse link at the scalar linear predictor `eta`.
-Return `mu = 1 / (1 + exp(-eta))`, its complement, and the derivative
-`dmu_deta = mu * one_minus_mu`. Compute the complement as the logistic
-function at `-eta` to avoid cancellation when `mu` is close to one.
+Update the response probabilities and inverse-link derivative for the logit
+link: `mu = logistic(eta)`, `one_minus_mu = logistic(-eta)`, and
+`dmu_deta = mu * one_minus_mu`, elementwise. The complement formula avoids
+subtraction from one. Return the response object.
+
+Fill the existing `rr.mu`, `rr.one_minus_mu`, and `rr.dmu_deta` buffers in place.
 """
-function inverse_link_logit(eta)
-    mu = StatsFuns.logistic(eta)
-    one_minus_mu = StatsFuns.logistic(-eta)
-    dmu_deta = mu * one_minus_mu
-    return mu, one_minus_mu, dmu_deta
+function inverse_link!(rr::BinaryResponse{T, LogitLink}) where {T}
+    rr.mu .= StatsFuns.logistic.(rr.eta)
+    rr.one_minus_mu .= StatsFuns.logistic.(-rr.eta)
+    rr.dmu_deta .= rr.mu .* rr.one_minus_mu
+    return rr
 end
 
 
 """
     link_probit(mu) -> eta
+
 Evaluate the probit link `eta = Φ⁻¹(mu)` for a scalar probability `mu` in
 `[0, 1]`, where `Φ` is the standard normal CDF. The endpoints `0` and `1`
 map to `-Inf` and `Inf`, respectively.
@@ -528,4 +562,14 @@ function deviance_bernoulli(y, mu, one_minus_mu)
         return -2 * log(one_minus_mu)
     end
     throw(DomainError(y, "Bernoulli response must be zero or one"))
+end
+
+"""
+    fit_probit(data, formula, beta0, max_iter, tolerance) -> BinaryEstimator
+
+Compatibility wrapper for `fit_glmfe` with `ProbitLink()`.
+See [`glmfe`](@ref) for the public formula-first interface.
+"""
+function fit_probit(data, formula, beta0, max_iter, tolerance)
+    return fit_glmfe(data, formula, beta0, max_iter, tolerance, ProbitLink())
 end

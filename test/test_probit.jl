@@ -171,7 +171,7 @@ end
 
     m = probit(
         df, @formula(y ~ x1 + x2); beta0 = nothing, max_iter = 1000, tolerance = 1e-8)
-    g = glm(@formula(y ~ x1 + x2), df, Binomial(), ProbitLink())
+    g = glm(@formula(y ~ x1 + x2), df, Binomial(), GLM.ProbitLink())
 
     # The no-fixed-effect model carries an explicit intercept.
     @test coefnames(m) == ["(Intercept)", "x1", "x2"]

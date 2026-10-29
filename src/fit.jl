@@ -568,11 +568,49 @@ function iv(estimator::TSLS, Z::AbstractMatrix{<:Real}, X::AbstractMatrix{<:Real
 end
 
 """
-    probit(df, formula; kwargs...) -> BinaryEstimator
+    probit(df::DataFrame, formula; beta0=nothing, max_iter=100, tolerance=1e-6)
+        -> BinaryEstimator
 
-Estimate a Probit model, optionally with fixed effects.
+Fit a Bernoulli probit model by Fisher scoring. The response must be binary;
+use `fe(...)` terms in `formula` to absorb fixed effects.
+
+`beta0=nothing` starts coefficients at zero. Without fixed effects the design
+includes an added intercept, which must also be included in a supplied `beta0`.
+Stop after `max_iter` iterations or when the relative deviance change is below
+`tolerance`. Reaching the iteration limit returns the last iterate.
+
+Equivalent to `glmfe(formula, df; link=ProbitLink(), ...)`.
+See [`glmfe`](@ref) for the convergence criterion and fitting details.
 """
 function probit(@nospecialize(df), formula::FormulaTerm;
         beta0 = nothing, max_iter = 100, tolerance = 1e-6)
-    return fit_probit(df, formula, beta0, max_iter, tolerance)
+    return glmfe(formula, df; link=ProbitLink(), beta0, max_iter, tolerance)
+end
+
+"""
+    glmfe(formula, data::DataFrame; link=ProbitLink(), beta0=nothing,
+          max_iter=100, tolerance=1e-6) -> BinaryEstimator
+
+Fit a Bernoulli model by Fisher scoring, optionally absorbing `fe(...)` terms.
+Use `ProbitLink()` for probit or `LogitLink()` for logistic regression. The
+response must contain only zeros and ones; other response families are not
+currently supported.
+
+`beta0=nothing` starts at zero. Without fixed effects an intercept is prepended
+to the design and must be included in a supplied coefficient vector. Stop when
+`abs(Dnew - Dold) / (0.1 + abs(Dnew)) < tolerance`, or return the last iterate
+after `max_iter` iterations. Step-halving attempts to reduce candidate deviance.
+
+# Examples
+```julia
+using Regress: fe
+m = glmfe(@formula(y ~ x + fe(id)), data; link=ProbitLink())
+m = glmfe(@formula(y ~ x + fe(id)), data; link=LogitLink())
+```
+
+`probit(data, formula; kwargs...)` remains available as a compatibility wrapper.
+"""
+function glmfe(formula::FormulaTerm, @nospecialize(data);
+        link=ProbitLink(), beta0=nothing, max_iter=100, tolerance=1e-6)
+    return fit_glmfe(data, formula, beta0, max_iter, tolerance, link)
 end
