@@ -63,7 +63,7 @@ end
 #actually return minus the symmetric
 function invsym!(X::Symmetric; has_intercept = false, setzeros = false, diagonal = 1:size(X, 2))
     tols = max.(diag(X), 1)
-    buffer = zeros(size(X, 1))
+    buffer = zeros(eltype(X), size(X, 1))
     for j in diagonal
         d = X[j, j]
         if setzeros && abs(d) < tols[j] * sqrt(eps())
@@ -98,84 +98,63 @@ end
 =============================================================================#
 
 """
-    sweep_collinear!(A, tol) -> (basis, rank)
+    sweep_collinear!(A, tol; has_intercept = false) -> (basis, rank)
 
-Optimized sweep operator for collinearity detection.
-Sweeps the symmetric matrix A in-place and returns a BitVector indicating
-which columns are in the basis (non-collinear).
-
-Uses SIMD-optimized loops and minimal allocations.
+Sweep operator for collinearity detection. Sweeps the symmetric matrix A in place
+(upper triangle) and returns a BitVector indicating which columns are in the basis
+(non-collinear).
 
 After sweeping:
 - Diagonal elements < 0 indicate swept (non-collinear) columns
 - Diagonal elements = 0 indicate collinear columns
 - The matrix contains -(X'X)^(-1) in the swept positions
 
+Column `j` is collinear when its pivot is below `tol · max(A[j, j], 1)`, with `A[j, j]`
+taken before any sweep, or, when `has_intercept`, after sweeping the first column. This
+is the rule of `sweep_solve!`, so `collinearity = :sweep` and `factorization = :sweep`
+drop the same columns.
+
 # Arguments
 - `A::Matrix{T}`: Upper triangular part of symmetric matrix (modified in-place)
 - `tol::Real`: Tolerance for detecting near-zero pivots
+- `has_intercept::Bool`: Whether the first column is the intercept
 
 # Returns
 - `basis::BitVector`: true for non-collinear columns
 - `rank::Int`: Number of non-collinear columns
 """
-function sweep_collinear!(A::Matrix{T}, tol::Real = sqrt(eps(T))) where {T <: AbstractFloat}
+function sweep_collinear!(A::Matrix{T}, tol::Real = sqrt(eps(T));
+        has_intercept::Bool = false) where {T <: AbstractFloat}
     k = size(A, 1)
     @assert size(A, 2) == k "Matrix must be square"
 
+    S = Symmetric(A, :U)
     basis = trues(k)
-    rank = k
+    tols = T[max(A[j, j], one(T)) for j in 1:k]
+    buffer = Vector{T}(undef, k)
 
-    @inbounds for j in 1:k
+    for j in 1:k
         d = A[j, j]
-        # Use abs(d) for consistency with sweep_solve!
-        threshold = max(abs(d), one(T)) * tol
-
-        if abs(d) < threshold
-            # Column j is collinear - zero it out
+        if abs(d) < tols[j] * tol
             basis[j] = false
-            rank -= 1
-            # Zero the column and row
-            for i in 1:j
-                A[i, j] = zero(T)
-            end
-            for i in j:k
-                A[j, i] = zero(T)
-            end
+            A[1:j, j] .= zero(T)
+            A[j, (j + 1):k] .= zero(T)
         else
-            # Sweep column j
-            inv_d = one(T) / d
-
-            # Update upper triangle: A[i,l] -= A[i,j] * A[j,l] / d
-            # Split loops allow better SIMD optimization (fixed ranges)
-            @inbounds for l in (j + 1):k
-                A_jl = A[j, l]
-                # Update column l, rows 1 to j-1
-                @simd for i in 1:(j - 1)
-                    A[i, l] -= A[i, j] * A_jl * inv_d
-                end
-                # Update diagonal and upper of remaining block
-                @simd for i in j:l
-                    A[i, l] -= A[i, j] * A_jl * inv_d
-                end
+            copy!(buffer, view(S, :, j))
+            BLAS.syrk!('U', 'N', -one(T) / d, buffer, one(T), A)
+            rmul!(buffer, one(T) / d)
+            @views copy!(A[1:(j - 1), j], buffer[1:(j - 1)])
+            @views copy!(A[j, (j + 1):k], buffer[(j + 1):k])
+            A[j, j] = -one(T) / d
+        end
+        if has_intercept && j == 1
+            for i in 1:k
+                tols[i] = max(A[i, i], one(T))
             end
-
-            # Update row j (becomes -A[j,:]/d after sweep)
-            @simd for l in (j + 1):k
-                A[j, l] *= inv_d
-            end
-
-            # Update column j above diagonal (becomes -A[:,j]/d)
-            @simd for i in 1:(j - 1)
-                A[i, j] *= inv_d
-            end
-
-            # Diagonal becomes -1/d
-            A[j, j] = -inv_d
         end
     end
 
-    return basis, rank
+    return basis, count(basis)
 end
 
 """
@@ -192,8 +171,9 @@ More memory efficient than QR for large n, small k.
 - `basis::BitVector`: Indicator of non-collinear columns
 - `X_reduced::Matrix{T}`: Matrix with only non-collinear columns
 """
-function detect_collinearity_sweep(X::Matrix{T}; tol::Real = 1e-8) where {T <:
-                                                                          AbstractFloat}
+function detect_collinearity_sweep(X::Matrix{T}; tol::Real = 1e-8,
+        has_intercept::Bool = false) where {T <:
+                                            AbstractFloat}
     n, k = size(X)
 
     # Handle edge cases
@@ -207,7 +187,7 @@ function detect_collinearity_sweep(X::Matrix{T}; tol::Real = 1e-8) where {T <:
     BLAS.syrk!('U', 'T', one(T), X, zero(T), XX)
 
     # Sweep to detect collinearity
-    basis, rank = sweep_collinear!(XX, T(tol))
+    basis, rank = sweep_collinear!(XX, T(tol); has_intercept)
 
     # Handle all-collinear case
     if rank == 0
@@ -215,7 +195,7 @@ function detect_collinearity_sweep(X::Matrix{T}; tol::Real = 1e-8) where {T <:
     end
 
     # Return basis and reduced matrix
-    X_reduced = X[:, basis]
+    X_reduced = all(basis) ? X : X[:, basis]
     return basis, X_reduced
 end
 
@@ -227,7 +207,7 @@ function ls_solve!(Xy::Symmetric, nx)
         invsym!(Xy, diagonal = 1:nx)
         return Xy[1:nx, (nx + 1):end]
     else
-        return zeros(Float64, 0, size(Xy, 2) - nx)
+        return zeros(eltype(Xy), 0, size(Xy, 2) - nx)
     end
 end
 

@@ -121,6 +121,17 @@ model_hac = model + vcov(Bartlett(5))
 model_qs = model + vcov(QuadraticSpectral(10))
 ```
 
+### Driscoll-Kraay
+
+For panel data, `DriscollKraay` applies a HAC kernel to the period sums of the moments.
+On a model fitted from a formula, the time and unit indices can be named by column,
+provided the columns were saved at fit time:
+
+```julia
+model = ols(df, @formula(y ~ x), save_cluster = [:year, :firm])
+model_dk = model + vcov(DriscollKraay(Bartlett(4); tis = :year, iis = :firm))
+```
+
 ## Combining with IV Models
 
 All variance estimators work with IV models. The `+ vcov(...)` syntax recomputes first-stage diagnostics:

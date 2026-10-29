@@ -10,47 +10,65 @@
 
 using LinearAlgebra
 
+# Estimators for which the KP statistic is defined. HR2–HR5 and CR2/CR3 have no
+# established form for it, and DriscollKraay, EWC, VARHAC and the smoothers are not
+# supported.
+_kp_supported(k) = false
+function _kp_supported(::Union{
+        CovarianceMatrices.Uncorrelated, CovarianceMatrices.HR0, CovarianceMatrices.HR1,
+        CovarianceMatrices.CR0, CovarianceMatrices.CR1, CovarianceMatrices.HAC})
+    true
+end
+function _kp_supported(k::CovarianceMatrices.CachedCR)
+    _kp_supported(CovarianceMatrices.estimator(k))
+end
+
+function _check_kp_estimator(k, statistic = "The Kleibergen-Paap statistic")
+    _kp_supported(k) && return nothing
+    throw(ArgumentError(
+        "$statistic is not defined for $(nameof(typeof(k))). It " *
+        "supports Uncorrelated, HC0, HC1, CR0, CR1 (any number of cluster dimensions) " *
+        "and the HAC kernels (Bartlett, Parzen, QuadraticSpectral, TukeyHanning, " *
+        "Truncated). Use, for example, `m + vcov(HC1())`."))
+end
+
 """
-    ranktest(Xendo_res, Z_res, Pi, vcov_type, nobs, dof_small, dof_fes)
+    ranktest(Xendo_res, Z_res, Pi, k, c)
 
-Compute the Kleibergen-Paap rk statistic for testing weak instruments.
+Kleibergen-Paap rk statistic for the rank of `Pi`, the l × k coefficients of the
+excluded instruments in the first-stage regressions. `Xendo_res` (n × k) holds the
+first-stage residuals and `Z_res` (n × l) the excluded instruments with the exogenous
+regressors partialled out.
 
-# Arguments
-- `Xendo_res::Matrix`: Residualized endogenous variables (n × k)
-- `Z_res::Matrix`: Residualized instruments (n × l)
-- `Pi::Matrix`: First-stage coefficient matrix
-- `vcov_type`: Variance estimator type (from CovarianceMatrices.jl)
-- `nobs::Int`: Number of observations
-- `dof_small::Int`: Degrees of freedom (number of parameters)
-- `dof_fes::Int`: Degrees of freedom absorbed by fixed effects
+The variance of the first-stage moments `Z_res ⊗ Xendo_res` is
+`c · n · aVar(k, moments)`, with `aVar` computed as in `vcov` (HR0 for `HR1`, CR0 on the
+same clusters for `CR1`) and `c` the finite-sample factor of the first-stage regression.
+For `Uncorrelated` it is the iid variance, `c` times that with σ² = RSS/n.
 
-# Returns
-- `r_kp`: The Kleibergen-Paap rk statistic
+Returns `NaN` when `Z_res'Z_res`, `Xendo_res'Xendo_res` or the variance of the
+statistic is not positive definite.
 """
 function ranktest(
-        Xendo_res::Matrix{T},
-        Z_res::Matrix{T},
-        Pi::Matrix{T},
-        vcov_type,
-        nobs::Int,
-        dof_small::Int,
-        dof_fes::Int
+        Xendo_res::AbstractMatrix{T},
+        Z_res::AbstractMatrix{T},
+        Pi::AbstractMatrix{T},
+        k,
+        c::Real
 ) where {T <: AbstractFloat}
-    k = size(Xendo_res, 2)  # Number of endogenous variables
-    l = size(Z_res, 2)      # Number of excluded instruments
+    Base.require_one_based_indexing(Xendo_res, Z_res, Pi)
+    _check_kp_estimator(k)
+    nendo = size(Xendo_res, 2)
+    l = size(Z_res, 2)
+    n = size(Z_res, 1)
 
-    # Handle edge cases
-    if k == 0 || l == 0
+    if nendo == 0 || l == 0
         return T(NaN)
     end
 
-    # Compute theta = F * Pi * G' where F and G are Cholesky factors
-    # This transforms the problem to have identity covariance
-    ZZ = Symmetric(Z_res' * Z_res)
-    XX = Symmetric(Xendo_res' * Xendo_res)
-
-    Fmatrix_chol = cholesky(ZZ; check = false)
-    Gmatrix_chol = cholesky(XX; check = false)
+    # theta = F * Pi * inv(G), with F and G the Cholesky factors of Z'Z and X'X,
+    # has identity covariance under iid errors.
+    Fmatrix_chol = cholesky(Symmetric(Z_res' * Z_res); check = false)
+    Gmatrix_chol = cholesky(Symmetric(Xendo_res' * Xendo_res); check = false)
 
     if !issuccess(Fmatrix_chol) || !issuccess(Gmatrix_chol)
         return T(NaN)
@@ -59,201 +77,88 @@ function ranktest(
     Fmatrix = Fmatrix_chol.U
     Gmatrix = Gmatrix_chol.U
 
-    # theta = F * Pi' * inv(G')
     theta = Fmatrix * (Gmatrix' \ Pi')'
 
-    # Compute SVD decomposition
     svddecomp = svd(theta, full = true)
     u = svddecomp.U
     vt = svddecomp.Vt
 
-    # Extract submatrices for the rank test (see Kleibergen-Paap p.102)
-    u_sub = u[k:l, k:l]
-    vt_sub = vt[k, k]
+    # Submatrices for the rank test (Kleibergen-Paap 2006, p. 102)
+    u_sub = u[nendo:l, nendo:l]
+    vt_sub = vt[nendo, nendo]
 
-    # Compute a_qq and b_qq
     if iszero(u_sub)
-        a_qq = u[1:l, k:l]
+        a_qq = u[1:l, nendo:l]
     else
-        a_qq = u[1:l, k:l] * (u_sub \ sqrt(u_sub * u_sub'))
+        a_qq = u[1:l, nendo:l] * (u_sub \ sqrt(u_sub * u_sub'))
     end
 
     if iszero(vt_sub)
-        b_qq = vt[1:k, k]'
+        b_qq = vt[1:nendo, nendo]'
     else
-        b_qq = sqrt(vt_sub * vt_sub') * (vt_sub' \ vt[1:k, k]')
+        b_qq = sqrt(vt_sub * vt_sub') * (vt_sub' \ vt[1:nendo, nendo]')
     end
 
-    # Kronecker product for the test statistic
     kronv = kron(b_qq, a_qq')
     lambda = kronv * vec(theta)
 
-    # Compute variance depending on vcov type
-    # Note: HR0/HR1 (= HC0/HC1) are heteroskedasticity-robust estimators and should
-    # use the sandwich form. Only truly homoskedastic estimators (Uncorrelated)
-    # should use the simple formula.
-    if vcov_type isa CovarianceMatrices.Uncorrelated
-        # Truly homoskedastic case (assumes i.i.d. errors)
-        vlab_chol = cholesky(Hermitian((kronv * kronv') ./ nobs); check = false)
-        if !issuccess(vlab_chol)
-            return T(NaN)
-        end
-        r_kp = lambda' * (vlab_chol \ lambda)
+    if k isa CovarianceMatrices.Uncorrelated
+        vlab = Hermitian((T(c) / n) .* (kronv * kronv'))
     else
-        # Robust case (HC0/HC1/HC2/HC3/cluster-robust) - compute sandwich variance
+        meat = _kp_meat(Xendo_res, Z_res, k, c)
         K = kron(Gmatrix, Fmatrix)'
-
-        # Compute the "meat" using CovarianceMatrices.jl
-        # For robust inference, we need the moment conditions
-        # M = Z_res ⊗ (Xendo_res - Z_res * Pi') adjusted for vcov type
-
-        # The meat is E[mm'] where m is the vectorized moment condition
-        # For now, use a simplified approach based on the original Vcov.jl
-
-        # Compute residuals from first stage: residuals_fs = Xendo_res - Z_res * Pi
-        # Use in-place computation to avoid allocating a new matrix
-        residuals_fs = copy(Xendo_res)
-        BLAS.gemm!('N', 'N', -one(T), Z_res, Pi, one(T), residuals_fs)
-
-        # Build moment matrix: kron of Z with residuals columns
-        # For k=1 (single endogenous), this simplifies to Z_res .* residuals_fs
-        # For k>1, we need the full Kronecker structure
-        n = nobs
-        kl = k * l
-        if k == 1
-            # Optimized path for single endogenous: avoid Kronecker allocation
-            # moment_matrix[:, i] = Z_res[:, i] .* residuals_fs[:, 1]
-            moment_matrix = Z_res .* residuals_fs
-        else
-            moment_matrix = Matrix{T}(undef, n, kl)
-            @inbounds for j in 1:k
-                res_j = @view residuals_fs[:, j]
-                for i in 1:l
-                    idx = (j - 1) * l + i
-                    Z_i = @view Z_res[:, i]
-                    mm_col = @view moment_matrix[:, idx]
-                    @simd for row in 1:n
-                        mm_col[row] = Z_i[row] * res_j[row]
-                    end
-                end
-            end
-        end
-
-        # Compute meat using CovarianceMatrices
-        meat = _compute_meat(moment_matrix, vcov_type, nobs, dof_small, dof_fes)
-
-        # Transform variance
         vhat = K \ (K \ meat)'
-        vlab_matrix = Hermitian(kronv * vhat * kronv')
-        vlab_chol = cholesky(vlab_matrix; check = false)
-
-        if !issuccess(vlab_chol)
-            return T(NaN)
-        end
-        r_kp = lambda' * (vlab_chol \ lambda)
+        vlab = Hermitian(kronv * vhat * kronv')
     end
+    vlab_chol = cholesky(vlab; check = false)
+    issuccess(vlab_chol) || return T(NaN)
+    r_kp = lambda' * (vlab_chol \ lambda)
 
     return r_kp[1]
 end
 
-"""
-    _compute_meat(moment_matrix, vcov_type, nobs, dof_small, dof_fes)
-
-Compute the meat of the sandwich estimator for the rank test.
-"""
-function _compute_meat(
-        moment_matrix::Matrix{T},
-        vcov_type,
-        nobs::Int,
-        dof_small::Int,
-        dof_fes::Int
-) where {T <: AbstractFloat}
-    n = size(moment_matrix, 1)
-
-    if vcov_type isa CovarianceMatrices.HR0
-        # No adjustment
-        return moment_matrix' * moment_matrix
-    elseif vcov_type isa CovarianceMatrices.HR1
-        # HC1 adjustment
-        dof_residual = max(1, n - dof_small - dof_fes)
-        scale = n / dof_residual
-        return scale * (moment_matrix' * moment_matrix)
-    elseif vcov_type isa Union{CovarianceMatrices.CR0, CovarianceMatrices.CR1}
-        # Cluster-robust - vcov_type.g[1] is a Clustering struct
-        clustering = vcov_type.g[1]
-        groups = clustering.groups       # Vector{Int}, 1-indexed
-        n_clusters = clustering.ngroups
-        p = size(moment_matrix, 2)
-
-        # Sum moments within clusters (column-major loop)
-        cluster_sums = zeros(T, n_clusters, p)
-        @inbounds for j in 1:p
-            for i in 1:n
-                cluster_sums[groups[i], j] += moment_matrix[i, j]
-            end
-        end
-
-        meat = cluster_sums' * cluster_sums
-
-        # Apply small-sample correction for CR1
-        if vcov_type isa CovarianceMatrices.CR1
-            dof_residual = max(1, n - dof_small - dof_fes)
-            scale = (n_clusters / (n_clusters - 1)) * (n / dof_residual)
-            meat *= scale
-        end
-
-        return meat
-    else
-        # Default: use HC1-like computation
-        dof_residual = max(1, n - dof_small - dof_fes)
-        scale = n / dof_residual
-        return scale * (moment_matrix' * moment_matrix)
-    end
+# `c · n · aVar(k, M)` for the moments `M`, whose columns are `Z_res .* v_j` for each
+# column `v_j` of the first-stage residuals `v`, endogenous variable by endogenous variable.
+function _kp_meat(v, Z_res, k, c)
+    M = reduce(hcat, (Z_res .* view(v, :, j) for j in axes(v, 2)))
+    k = _uncached(k)
+    A = _moment_aVar(k, M; demean = false, scale = false,
+        weights = CovarianceMatrices.bandwidthweights(k, M))
+    return eltype(M)(c) .* parent(A)
 end
 
 """
-    compute_first_stage_fstat(Xendo_res, Z_res, Pi, vcov_type, nobs, dof_small, dof_fes)
+    compute_first_stage_fstat(Xendo_res, Z_res, Pi, k, c)
 
-Compute the Kleibergen-Paap first-stage F-statistic and p-value.
-
-Returns (F_kp, p_kp) where:
-- F_kp is the first-stage F-statistic
-- p_kp is the p-value from chi-squared distribution
+Kleibergen-Paap rk Wald F statistic and its p-value, `(F_kp, p_kp)`, from
+[`ranktest`](@ref) with the variance estimator `k` and finite-sample factor `c`.
+`F_kp = r_kp / l` with `l` the number of excluded instruments, and `p_kp` is the
+χ²(l − k + 1) p-value of `r_kp`. Both are `NaN` when the statistic is not defined.
 """
 function compute_first_stage_fstat(
-        Xendo_res::Matrix{T},
-        Z_res::Matrix{T},
-        Pi::Matrix{T},
-        vcov_type,
-        nobs::Int,
-        dof_small::Int,
-        dof_fes::Int
+        Xendo_res::AbstractMatrix{T},
+        Z_res::AbstractMatrix{T},
+        Pi::AbstractMatrix{T},
+        k,
+        c::Real
 ) where {T <: AbstractFloat}
-    k = size(Xendo_res, 2)  # Number of endogenous variables
-    l = size(Z_res, 2)      # Number of excluded instruments
+    nendo = size(Xendo_res, 2)
+    l = size(Z_res, 2)
 
-    try
-        r_kp = ranktest(Xendo_res, Z_res, Pi, vcov_type, nobs, dof_small, dof_fes)
-
-        if isnan(r_kp)
-            return T(NaN), T(NaN)
-        end
-
-        # Degrees of freedom for chi-squared test
-        df = l - k + 1
-
-        # P-value from chi-squared distribution
-        p_kp = chisqccdf(df, r_kp)
-
-        # F-statistic: divide by number of instruments
-        F_kp = r_kp / l
-
-        return F_kp, p_kp
+    r_kp = try
+        ranktest(Xendo_res, Z_res, Pi, k, c)
     catch e
+        _isnumericalfailure(e) || rethrow()
         @info "ranktest failed: $e; first-stage statistics not estimated"
-        return T(NaN), T(NaN)
+        T(NaN)
     end
+    isnan(r_kp) && return T(NaN), T(NaN)
+
+    return T(r_kp / l), T(chisqccdf(l - nendo + 1, r_kp))
 end
+
+# Failures that mean a statistic is not defined for the data, rather than a bug.
+_isnumericalfailure(e) = e isa Union{PosDefException, SingularException, LAPACKException}
 
 ##############################################################################
 ##
@@ -262,8 +167,8 @@ end
 ##############################################################################
 
 """
-    compute_per_endogenous_fstats(Xendo_res, Z_res, Pi, vcov_type, nobs, dof_small, dof_fes;
-                                   Xendo_orig=nothing, newZ=nothing)
+    compute_per_endogenous_fstats(Xendo_res, Z_res, Pi, vcov_type, dof_fes;
+                                   Xendo_orig=nothing, newZ=nothing, first_stage=nothing)
 
 Compute F-statistics for each endogenous variable's first-stage regression.
 
@@ -276,11 +181,11 @@ For each endogenous variable j:
 - `Z_res::Matrix{T}`: Residualized instruments (n × l)
 - `Pi::Matrix{T}`: First-stage coefficient matrix (l × k), instruments portion only
 - `vcov_type`: Variance estimator type (from CovarianceMatrices.jl)
-- `nobs::Int`: Number of observations
-- `dof_small::Int`: Degrees of freedom (number of parameters)
 - `dof_fes::Int`: Degrees of freedom absorbed by fixed effects
 - `Xendo_orig::Union{Matrix{T}, Nothing}`: Original endogenous (for robust F)
 - `newZ::Union{Matrix{T}, Nothing}`: Full first-stage design [Xexo, Z] (for robust F)
+- `first_stage`: The first-stage regression whose finite-sample factor the variance uses
+  (a `_FirstStage`), or `nothing` for that of the regression on `newZ` alone
 
 # Returns
 - `(F_stats, p_values)`: Vectors of F-statistics and p-values, one per endogenous variable
@@ -290,17 +195,16 @@ function compute_per_endogenous_fstats(
         Z_res::Matrix{T},
         Pi::Matrix{T},
         vcov_type,
-        nobs::Int,
-        dof_small::Int,
         dof_fes::Int;
         Xendo_orig::Union{Matrix{T}, Nothing} = nothing,
-        newZ::Union{Matrix{T}, Nothing} = nothing
+        newZ::Union{Matrix{T}, Nothing} = nothing,
+        first_stage = nothing
 ) where {T <: AbstractFloat}
     l = size(Z_res, 2)      # Number of excluded instruments
 
     if !isnothing(Xendo_orig) && !isnothing(newZ)
         return _compute_first_stage_fstats_via_ols(
-            newZ, Xendo_orig, l, vcov_type, dof_fes
+            newZ, Xendo_orig, l, vcov_type, dof_fes; first_stage
         )
     else
         throw(ArgumentError(
@@ -310,7 +214,8 @@ function compute_per_endogenous_fstats(
 end
 
 """
-    _compute_first_stage_fstats_via_ols(newZ, Xendo, n_instruments, vcov_type, dof_fes)
+    _compute_first_stage_fstats_via_ols(newZ, Xendo, n_instruments, vcov_type, dof_fes;
+                                        first_stage = nothing)
 
 Compute first-stage F-statistics by constructing lightweight OLSMatrixEstimator models
 from pre-computed first-stage data and delegating variance computation to CovarianceMatrices.jl.
@@ -325,6 +230,10 @@ CovarianceMatrices sandwich formula.
 - `n_instruments::Int`: Number of excluded instruments (l)
 - `vcov_type`: Any variance estimator supported by CovarianceMatrices.jl
 - `dof_fes::Int`: Degrees of freedom absorbed by fixed effects
+- `first_stage`: The first-stage regression whose finite-sample factor the variance uses
+  (a `_FirstStage`), or `nothing` for that of the regression on `newZ` alone. The two
+  differ for `CR0` and `CR1` when the model absorbs fixed effects, which enter the
+  cluster K of `_cluster_dof` but are not columns of `newZ`.
 
 # Returns
 - `(F_stats, p_values)`: Vectors of F-statistics and p-values, one per endogenous
@@ -334,7 +243,8 @@ function _compute_first_stage_fstats_via_ols(
         Xendo::Matrix{T},
         n_instruments::Int,
         vcov_type,
-        dof_fes::Int
+        dof_fes::Int;
+        first_stage = nothing
 ) where {T <: AbstractFloat}
     n, k_total = size(newZ)
     k = size(Xendo, 2)
@@ -387,6 +297,7 @@ function _compute_first_stage_fstats_via_ols(
             rr, pp, basis,
             n, dof_fs, dof_residual_fs,
             T(rss_j), T(tss_j), T(1 - rss_j / tss_j), true,
+            _matrix_coefnames(nothing, k_total), Vector{Int}[], Int[], trues(n),
             vcov_type, vcov_placeholder,
             Vector{T}(undef, k_total), Vector{T}(undef, k_total), Vector{T}(undef, k_total)
         )
@@ -394,10 +305,16 @@ function _compute_first_stage_fstats_via_ols(
         # Use CovarianceMatrices to compute vcov — handles all HC/HAC/CR/EWC types
         vcov_matrix = try
             CovarianceMatrices.vcov(vcov_type, fs_model)
-        catch
+        catch e
+            _isnumericalfailure(e) || rethrow()
             F_stats[j] = T(NaN)
             p_values[j] = T(NaN)
             continue
+        end
+        if !isnothing(first_stage)
+            vcov_matrix = vcov_matrix .*
+                          T(_finite_sample_factor(vcov_type, first_stage, true) /
+                            _finite_sample_factor(vcov_type, fs_model, true))
         end
 
         # Extract instrument coefficient block (last l × l)

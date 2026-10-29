@@ -99,22 +99,22 @@ function nullloglikelihood_within(m::AbstractRegressModel)
     end
 end
 
+# The parameter count is `nobs - dof_residual`: estimated coefficients plus
+# absorbed fixed-effect levels. `dof(model)` counts only the coefficients.
 function StatsAPI.adjr2(model::AbstractRegressModel, variant::Symbol = :devianceratio)
-    has_int = model_hasintercept(model)
-    k = dof(model) + dof_fes(model) + has_int
+    n = nobs(model)
+    # The null model fits one parameter when the null deviance is centered
+    centered = model_hasintercept(model) | has_fe(model)
 
     if variant == :McFadden
-        has_fe_val = has_fe(model)
-        k = k - has_int - has_fe_val
+        k = n - dof_residual(model) - centered
         ll = loglikelihood(model)
         ll0 = nullloglikelihood(model)
         1 - (ll - k)/ll0
     elseif variant == :devianceratio
-        n = nobs(model)
         dev = deviance(model)
         dev0 = nulldeviance(model)
-        has_fe_val = has_fe(model)
-        1 - (dev*(n - (has_int | has_fe_val))) / (dev0 * max(n - k, 1))
+        1 - (dev * (n - centered)) / (dev0 * dof_residual(model))
     else
         throw(ArgumentError("variant must be one of :McFadden or :devianceratio"))
     end
@@ -146,15 +146,14 @@ function StatsAPI.coeftable(m::AbstractRegressModel; level = 0.95)
     se = stderror(m)
     tt = t_stats(m)
     pv = p_values(m)
-    coefnms = coefnames(m)
+    coefnms = String[string(c) for c in coefnames(m)]
 
     # Compute confidence intervals using precomputed se
     scale = tdistinvcdf(dof_residual(m), 1 - (1 - level) / 2)
     conf_int = hcat(cc .- scale .* se, cc .+ scale .* se)
 
     # Put (intercept) last if present
-    if !isempty(coefnms) &&
-       ((coefnms[1] == Symbol("(Intercept)")) || (coefnms[1] == "(Intercept)"))
+    if !isempty(coefnms) && coefnms[1] == "(Intercept)"
         newindex = vcat(2:length(cc), 1)
         cc = cc[newindex]
         se = se[newindex]
@@ -164,10 +163,12 @@ function StatsAPI.coeftable(m::AbstractRegressModel; level = 0.95)
         coefnms = coefnms[newindex]
     end
 
+    levstr = isinteger(100 * level) ? string(Integer(100 * level)) : string(100 * level)
     CoefTable(
-        hcat(cc, se, tt, pv, conf_int[:, 1:2]),
-        ["Estimate", "Std. Error", "t-stat", "Pr(>|t|)", "Lower 95%", "Upper 95%"],
-        ["$(coefnms[i])" for i in 1:length(cc)], 4)
+        hcat(cc, se, tt, pv, conf_int),
+        ["Estimate", "Std. Error", "t-stat", "Pr(>|t|)",
+            "Lower $levstr%", "Upper $levstr%"],
+        coefnms, 4)
 end
 
 ##############################################################################

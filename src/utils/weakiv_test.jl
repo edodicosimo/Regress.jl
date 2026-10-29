@@ -90,6 +90,12 @@ post-estimation command on an IV model.
 Requires a single endogenous regressor. The model must have been fit with
 post-estimation data stored (the default).
 
+The test uses the model's variance estimator, `m.vcov_estimator`, with the
+finite-sample factor `vcov` applies to the first-stage regression; for `HC1` and `CR1`
+this is Stata `weakivtest`'s W. It supports `Uncorrelated`, `HC0`, `HC1`, `CR0`, `CR1`
+(any number of cluster dimensions) and the HAC kernels, and throws an `ArgumentError`
+for any other estimator.
+
 # Arguments
 - `m::IVEstimator`: A fitted IV model (TSLS, LIML, etc.)
 - `level::Real`: Confidence level alpha (default: 0.05)
@@ -112,33 +118,29 @@ function weakivtest(m::IVEstimator{T}; level::Real = 0.05, tol::Real = 0.001,
     # Validate
     pe = m.postestimation
     isnothing(pe) &&
-        error("Model does not have post-estimation data. Re-fit with save=true.")
+        throw(ArgumentError("Model does not have post-estimation data. Re-fit with save=true."))
     fsd = pe.first_stage_data
     !has_first_stage_data(fsd) &&
-        error("First-stage data not available. Re-fit with save=true.")
+        throw(ArgumentError("First-stage data not available. Re-fit with save=true."))
 
     n_endo = size(fsd.Xendo_res, 2)
     n_endo == 1 ||
-        error("weakivtest requires exactly one endogenous regressor, got $n_endo.")
+        throw(ArgumentError("weakivtest requires exactly one endogenous regressor, got $n_endo."))
+
+    k = _weakiv_estimator(m)
 
     K = size(fsd.Z_res, 2)  # Number of excluded instruments
     S = nobs(m)              # Number of observations
-    L = fsd.n_exo            # Number of exogenous regressors
 
-    # Reconstruct y = residuals + X * beta
-    model_resid = residuals_for_vcov(m)
-    X_orig = pe.X_original
-    y_full = model_resid .+ X_orig * m.coef
-
-    k_total = size(X_orig, 2)
-    k_exo = k_total - n_endo
-
+    # The first-stage design is [Xexo, Z]
+    k_exo = fsd.n_exo
+    Xexo = fsd.newZ[:, 1:k_exo]
     Xendo_orig = fsd.Xendo_orig[:, 1]
     Z_res = fsd.Z_res
 
     return _weakivtest_core(
-        y_full, X_orig, Xendo_orig, Z_res,
-        k_exo, K, S, L, m.vcov_estimator,
+        pe.y, Xexo, Xendo_orig, Z_res,
+        k_exo, K, S, _FirstStage(m), k,
         T(level), T(tol), benchmark
     )
 end
@@ -163,23 +165,22 @@ A `WeakIVTestResult` containing effective F, robust F, critical values, etc.
 function weakivtest(m::IVMatrixEstimator{T}; level::Real = 0.05, tol::Real = 0.001,
         benchmark::Symbol = :nagar) where {T}
     pe = m.postestimation
-    n_endo = pe.n_endogenous
+    n_endo = length(pe.endo_cols)
     n_endo == 1 ||
-        error("weakivtest requires exactly one endogenous regressor, got $n_endo.")
+        throw(ArgumentError("weakivtest requires exactly one endogenous regressor, got $n_endo."))
+    k = _weakiv_estimator(m)
 
-    X_orig = pe.X              # [Xexo, Xendo]
-    k_total = size(X_orig, 2)
-    k_exo = k_total - n_endo
+    # Z holds the exogenous columns of X, in order, then the excluded instruments.
+    exo_cols = _exo_cols(pe)
+    k_exo = length(exo_cols)
+    Xexo = pe.X[:, exo_cols]
+    Xendo_orig = pe.X[:, only(pe.endo_cols)]
 
-    Xendo_orig = X_orig[:, k_exo + 1]  # single endogenous column
-
-    # Extract excluded instruments from Z = [Xexo, Zinstr]
     Z_instr = pe.Z[:, (k_exo + 1):end]
     K = size(Z_instr, 2)
 
     # Residualize excluded instruments from exogenous regressors
     if k_exo > 0
-        Xexo = X_orig[:, 1:k_exo]
         QR_exo = qr(Xexo)
         Q_exo = Matrix(QR_exo.Q)
         Z_res = Z_instr .- Q_exo * (Q_exo' * Z_instr)
@@ -188,52 +189,67 @@ function weakivtest(m::IVMatrixEstimator{T}; level::Real = 0.05, tol::Real = 0.0
     end
 
     S = nobs(m)
-    L = k_exo  # number of exogenous regressors (includes intercept column if present)
-
-    # Reconstruct y = residuals + X * beta
-    y_full = pe.residuals .+ X_orig * m.coef
 
     return _weakivtest_core(
-        y_full, X_orig, Xendo_orig, Z_res,
-        k_exo, K, S, L, m.vcov_estimator,
+        pe.y, Xexo, Xendo_orig, Z_res,
+        k_exo, K, S, _MatrixFirstStage(m, k_exo + K), k,
         T(level), T(tol), benchmark
     )
 end
+
+# The variance estimator of `m`, with column-named clusters resolved, checked to be one
+# that the test supports.
+function _weakiv_estimator(m)
+    _check_kp_estimator(m.vcov_estimator, "The weak-instrument test")
+    return _uncached(_resolve_clusters(m.vcov_estimator, m))
+end
+
+# The first-stage regression of a matrix-fitted IV model `m`: `ncoef` counts the
+# exogenous regressors and the excluded instruments, and the fixed effects absorbed in
+# `m` are absorbed in it too.
+struct _MatrixFirstStage{M}
+    m::M
+    ncoef::Int
+end
+StatsAPI.nobs(f::_MatrixFirstStage) = nobs(f.m)
+StatsAPI.dof_residual(f::_MatrixFirstStage) = nobs(f.m) - f.ncoef - dof_fes(f.m)
+_cluster_dof(k, f::_MatrixFirstStage) = _cluster_dof(k, f.m) - sum(_CM.mask(f.m)) + f.ncoef
 
 ##############################################################################
 ## Core computation (shared by IVEstimator and IVMatrixEstimator methods)
 ##############################################################################
 
 """
-    _weakivtest_core(y_full, X_orig, Xendo_orig, Z_res, k_exo, K, S, L,
+    _weakivtest_core(y, Xexo, Xendo_orig, Z_res, k_exo, K, S, fs,
                      vcov_est, level, eps, benchmark) -> WeakIVTestResult
 
 Internal computational core for the weak IV test. Both `weakivtest(::IVEstimator)`
 and `weakivtest(::IVMatrixEstimator)` delegate here after extracting data.
 
 # Arguments
-- `y_full`: Reconstructed response vector (residuals + X*β)
-- `X_orig`: Original regressor matrix [Xexo, Xendo]
+- `y`: Response vector of the fit (demeaned and weighted as its regressors)
+- `Xexo`: Exogenous regressors (`k_exo` columns)
 - `Xendo_orig`: Original endogenous variable (vector)
 - `Z_res`: Excluded instruments residualized from exogenous regressors
 - `k_exo`: Number of exogenous regressors (including intercept column if present)
 - `K`: Number of excluded instruments
 - `S`: Number of observations
-- `L`: Number of exogenous regressors for DOF computation
-- `vcov_est`: Variance-covariance estimator
+- `fs`: The first-stage regression (a `_FirstStage` or `_MatrixFirstStage`), which
+  gives the degrees of freedom of Ω and the finite-sample factor of W
+- `vcov_est`: Variance estimator, one that `_kp_supported` accepts, with its clusters
+  resolved and without a cache
 - `level`: Confidence level alpha
 - `eps`: Convergence tolerance
 - `benchmark`: Bias benchmark (:nagar or :ols)
 """
 function _weakivtest_core(
-        y_full::Vector{T}, X_orig::Matrix{T},
+        y_full::Vector{T}, Xexo::Matrix{T},
         Xendo_orig::Vector{T}, Z_res::Matrix{T},
-        k_exo::Int, K::Int, S::Int, L::Int,
+        k_exo::Int, K::Int, S::Int, fs,
         vcov_est, level::T, eps::T, benchmark::Symbol
 ) where {T}
     # Step 1: Partial out exogenous regressors from y and Xendo
     if k_exo > 0
-        Xexo = X_orig[:, 1:k_exo]
         QR_exo = qr(Xexo)
         Q_exo = Matrix(QR_exo.Q)
         y_res = y_full .- Q_exo * (Q_exo' * y_full)
@@ -258,25 +274,24 @@ function _weakivtest_core(
     dhat = (Zs' * y_res) ./ T(S)              # K × 1
     res_y = y_res .- Zs * dhat
 
-    # Step 4: Compute Omega (unadjusted cross-product, DOF-adjusted)
-    # dof_omega = S - K - L where L includes intercept column when present
-    dof_omega = S - K - L
+    # Step 4: Compute Omega, the residual covariance of the reduced form, with the
+    # degrees of freedom of the first-stage regression
+    dof_omega = dof_residual(fs)
 
     res_matrix = hcat(res_y, res_endo)  # n × 2
     Omega_unscaled = res_matrix' * res_matrix  # 2 × 2
     Omega = Omega_unscaled ./ dof_omega
 
-    # Step 5: Compute W matrix
-    # Build stacked moment matrix: [res_y .* Zs, res_endo .* Zs]
-    M_stacked = hcat(res_y .* Zs, res_endo .* Zs)  # n × 2K
-
-    # Raw meat (HC0-style: M'M, or cluster-summed for CR)
-    raw_meat = _weakiv_compute_meat(M_stacked, vcov_est, S)
-
-    # Cluster DOF adjustment (matching Stata)
-    clustdfadj = _weakiv_cluster_dof_adj(vcov_est, S)
-
-    W = (raw_meat ./ dof_omega) ./ clustdfadj  # 2K × 2K
+    # Step 5: Compute W, the variance of the stacked moments [res_y .* Zs, res_endo .* Zs],
+    # with the finite-sample factor `vcov` applies to the first-stage regression. For
+    # HC1 and CR1 this is Stata weakivtest's W.
+    W = if _is_homoskedastic(vcov_est)
+        # Ω ⊗ Zs'Zs/S, and Zs'Zs/S = I.
+        kron(Omega, Matrix{T}(I, K, K))
+    else
+        M_stacked = hcat(res_y .* Zs, res_endo .* Zs)  # n × 2K
+        T(_kp_factor(vcov_est, fs)) .* _weakiv_meat(M_stacked, vcov_est) ./ S
+    end  # 2K × 2K
 
     omega_22 = Omega[2, 2]
 
@@ -341,14 +356,12 @@ function _weakivtest_core(
     F_eff_val = S * pipi / tr(W_2)
     F_robust_val = S * dot(pihat, W_2_inv * pihat) / K
 
-    # Step 11: Compute bias bounds (B_TSLS, B_LIML, B_GMMf)
-    if benchmark == :nagar
-        B_TSLS = _compute_BTSLS_nagar(W_1, W_12, W_2, T(eps))
-        B_LIML = _compute_BLIML_nagar(W_1, W_12, W_2, Omega, T(eps))
-    else  # :ols
-        B_TSLS = _compute_BTSLS_ols(Omega, W_1, W_12, W_2, T(eps))
-        B_LIML = _compute_BLIML_nagar(W_1, W_12, W_2, Omega, T(eps))
-    end
+    # Step 11: Compute bias bounds (B_TSLS, B_LIML, B_GMMf). Each is assigned once: the
+    # critical-value closures below capture them, and a variable assigned in several
+    # branches would be captured as a `Core.Box`.
+    B_TSLS = benchmark == :nagar ? _compute_BTSLS_nagar(W_1, W_12, W_2, T(eps)) :
+             _compute_BTSLS_ols(Omega, W_1, W_12, W_2, T(eps))
+    B_LIML = _compute_BLIML_nagar(W_1, W_12, W_2, Omega, T(eps))
 
     # B_GMMf computation
     W_2mh = _matrix_power_sym(W_2, -0.5)
@@ -360,11 +373,9 @@ function _weakivtest_core(
     mineig = minimum(eigs_12s)
     maxeig = maximum(eigs_12s)
 
-    if benchmark == :nagar
-        B_GMMf = _compute_BGMMf_nagar(trW_1s, trW_12s, mineig, maxeig, K, bgmmf_val)
-    else
-        B_GMMf = _compute_BGMMf_ols(Omega, trW_1s, trW_12s, mineig, maxeig, K, bgmmf_val)
-    end
+    B_GMMf = benchmark == :nagar ?
+             _compute_BGMMf_nagar(trW_1s, trW_12s, mineig, maxeig, K, bgmmf_val) :
+             _compute_BGMMf_ols(Omega, trW_1s, trW_12s, mineig, maxeig, K, bgmmf_val)
 
     # Step 12: Compute critical values
     tau_x = (T(20), T(10), T(5), T(10 / 3))
@@ -401,59 +412,11 @@ end
 
 _is_homoskedastic(v) = v isa CovarianceMatrices.Uncorrelated
 
-##############################################################################
-## Helper: compute raw meat (HC0-style, no DOF adjustment) for W matrix
-##############################################################################
-
-"""
-    _weakiv_compute_meat(M, vcov_est, n)
-
-Compute the meat of the sandwich for the weak IV test.
-Returns raw M'M for HC estimators, or cluster-summed version for CR estimators.
-No DOF scaling is applied (the caller handles that).
-"""
-function _weakiv_compute_meat(M::Matrix{T}, vcov_est, n::Int) where {T}
-    if vcov_est isa Union{CovarianceMatrices.CR0, CovarianceMatrices.CR1}
-        # Cluster-robust: sum within clusters first
-        clusters = vcov_est.g[1]
-        ngroups = clusters.ngroups
-        groups = clusters.groups
-        k = size(M, 2)
-
-        cluster_sums = zeros(T, ngroups, k)
-        @inbounds for i in 1:n
-            g = groups[i]
-            @simd for j in 1:k
-                cluster_sums[g, j] += M[i, j]
-            end
-        end
-
-        return cluster_sums' * cluster_sums
-    elseif vcov_est isa CovarianceMatrices.HAC
-        # For HAC estimators, use CovarianceMatrices.aVar directly
-        # aVar returns meat/n, so multiply by n to get meat
-        Σ = CovarianceMatrices.aVar(vcov_est, M; scale = true)
-        return Matrix(Σ) .* n
-    else
-        # HC0-style: M'M
-        return M' * M
-    end
-end
-
-"""
-    _weakiv_cluster_dof_adj(vcov_est, n)
-
-Compute the cluster DOF adjustment factor (Stata's clustdfadj).
-For non-clustered estimators, returns 1.0.
-"""
-function _weakiv_cluster_dof_adj(vcov_est, n::Int)
-    if vcov_est isa Union{CovarianceMatrices.CR0, CovarianceMatrices.CR1}
-        clusters = vcov_est.g[1]
-        G = clusters.ngroups
-        return (n / (n - 1)) * (G - 1) / G
-    else
-        return 1.0
-    end
+# `n · aVar(k, M)` of the moments `M`, as in the Kleibergen-Paap statistic.
+function _weakiv_meat(M, k)
+    A = _moment_aVar(k, M; demean = false, scale = false,
+        weights = CovarianceMatrices.bandwidthweights(k, M))
+    return parent(A)
 end
 
 ##############################################################################
@@ -463,14 +426,17 @@ end
 """
     _weakiv_compute_avar_residuals(resid, Zstar, vcov_est, n)
 
-Compute the avar matrix S_1 = Zstar' * diag(resid²) * Zstar (or clustered version)
-for computing standard errors of reduced-form estimators.
+Compute the avar matrix S_1 of the moments `Zstar .* resid`, `aVar` with no
+finite-sample factor (σ² Zstar'Zstar / n with σ² = resid'resid / n under
+`Uncorrelated`), for the standard errors of the reduced-form estimators.
 Returns the K × K matrix.
 """
 function _weakiv_compute_avar_residuals(resid::Vector{T}, Zstar::Matrix{T},
         vcov_est, n::Int) where {T}
-    M = Zstar .* resid  # n × K moment matrix
-    return _weakiv_compute_meat(M, vcov_est, n) ./ n
+    if _is_homoskedastic(vcov_est)
+        return (dot(resid, resid) / n) .* (Zstar' * Zstar) ./ n
+    end
+    return _weakiv_meat(Zstar .* resid, vcov_est) ./ n
 end
 
 ##############################################################################
@@ -792,8 +758,9 @@ function _compute_BGMMf_nagar(trW_1s::T, trW_12s::T, mineig::T, maxeig::T,
                 push!(results, abs(_BGMMf_objective_nagar(
                     beta_opt, trW_1s, trW_12s, eig, K)))
             end
-        catch
-            # If optimization fails for a combination, skip
+        catch e
+            # A combination whose optimization fails numerically does not enter the bound.
+            _isnumericalfailure(e) || rethrow()
         end
     end
 
@@ -828,8 +795,9 @@ function _compute_BGMMf_ols(Omega, trW_1s::T, trW_12s::T, mineig::T, maxeig::T,
                 push!(results, abs(_BGMMf_objective_ols(
                     beta_opt, Omega, trW_1s, trW_12s, eig, K)))
             end
-        catch
-            # If optimization fails for a combination, skip
+        catch e
+            # A combination whose optimization fails numerically does not enter the bound.
+            _isnumericalfailure(e) || rethrow()
         end
     end
 

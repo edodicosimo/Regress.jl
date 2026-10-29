@@ -32,12 +32,12 @@ Detect collinear columns in design matrix X.
 - `basis::BitVector`: Indicator of non-collinear columns
 - `X_reduced::Matrix{T}`: Matrix with only non-collinear columns
 """
-function detect_collinearity(X::Matrix{T}; tol::Real = 1e-8, method::Symbol = :qr) where {T <:
-                                                                                          AbstractFloat}
+function detect_collinearity(X::Matrix{T}; tol::Real = 1e-8, method::Symbol = :qr,
+        has_intercept::Bool = false) where {T <: AbstractFloat}
     if method == :qr
         return detect_collinearity_qr(X; tol = tol)
     elseif method == :sweep
-        return detect_collinearity_sweep(X; tol = tol)
+        return detect_collinearity_sweep(X; tol, has_intercept)
     else
         throw(ArgumentError("collinearity method must be :qr or :sweep, got :$method"))
     end
@@ -91,8 +91,8 @@ function detect_collinearity_qr(X::Matrix{T}; tol::Real = 1e-8) where {T <: Abst
         end
     end
 
-    # Return basis and reduced matrix (subset only once)
-    X_reduced = X[:, basis]
+    # X itself when no column is collinear; the solvers do not modify it.
+    X_reduced = all(basis) ? X : X[:, basis]
     return basis, X_reduced
 end
 
@@ -170,8 +170,21 @@ function fit_ols_core!(rr::OLSResponse{T}, X::Matrix{T},
         return _fit_sweep!(rr, X, save_matrices, has_intercept, tol)
     end
 
+    # One X'X serves both the collinearity sweep and the Cholesky factorization.
+    if factorization == :chol && collinearity == :sweep
+        XX = compute_crossproduct(X)
+        basis_coef, _ = sweep_collinear!(copy(parent(XX)), T(tol); has_intercept)
+        X_reduced = all(basis_coef) ? X : X[:, basis_coef]
+        XX_reduced = all(basis_coef) ? XX :
+                     Symmetric(parent(XX)[basis_coef, basis_coef], :U)
+        pp, beta_reduced = _fit_cholesky!(rr, X, X_reduced, basis_coef, save_matrices;
+            XX = XX_reduced)
+        return pp, basis_coef, beta_reduced
+    end
+
     # Step 1: Detect collinearity and get reduced X (done once)
-    basis_coef, X_reduced = detect_collinearity(X; tol = tol, method = collinearity)
+    basis_coef, X_reduced = detect_collinearity(X; tol, method = collinearity,
+        has_intercept)
 
     # Step 2: Solve based on factorization method
     if factorization == :chol
@@ -179,7 +192,7 @@ function fit_ols_core!(rr::OLSResponse{T}, X::Matrix{T},
     elseif factorization == :qr
         pp, beta_reduced = _fit_qr!(rr, X, X_reduced, basis_coef, save_matrices)
     else
-        error("factorization must be :chol, :qr, or :sweep, got :$factorization")
+        throw(ArgumentError("factorization must be :chol, :qr, or :sweep, got :$factorization"))
     end
 
     return pp, basis_coef, beta_reduced
@@ -190,10 +203,7 @@ Internal Cholesky-based OLS solver.
 """
 function _fit_cholesky!(rr::OLSResponse{T}, X::Matrix{T},
         X_reduced::Matrix{T}, basis_coef::BitVector,
-        save_matrices::Bool) where {T}
-
-    # Compute X'X using BLAS syrk (more efficient than X_reduced' * X_reduced)
-    XX = compute_crossproduct(X_reduced)
+        save_matrices::Bool; XX = compute_crossproduct(X_reduced)) where {T}
     chol_fact = cholesky(XX)
 
     # Solve: β = (X'X)^(-1) X'y

@@ -41,7 +41,7 @@ extract_results <- function(model, model_name, vcov_type, vcov_label) {
 
     # Get first-stage F for IV models
     fs_F <- NA
-    if (inherits(model, "fixest") && !is.null(model$iv)) {
+    if (inherits(model, "fixest") && isTRUE(model$is_iv)) {
         # Get first-stage F-stat from fitstat
         fs <- fitstat(model, "ivf", verbose = FALSE)
         if (!is.null(fs$ivf)) {

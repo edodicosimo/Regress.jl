@@ -1,7 +1,7 @@
 module Regress
 
 using CovarianceMatrices: CovarianceMatrices, AbstractAsymptoticVarianceEstimator,
-                          CovarianceMatrix, aVar, bread, momentmatrix, stderror,
+                          CovarianceMatrix, aVar, bread, stderror,
                           vcov,
                           HC0, HC1, HC2, HC3, HC4, HC5,
                           CR0, CR1, CR2, CR3,
@@ -13,8 +13,9 @@ using DataFrames: DataFrames, AsTable, DataFrame, Not, combine, completecases,
 using FixedEffects: FixedEffects, AbstractFixedEffectSolver, FixedEffect,
                     solve_coefficients!, solve_residuals!
 using LinearAlgebra: LinearAlgebra, BLAS, Cholesky, ColumnNorm, Hermitian, I,
+                     LAPACKException, PosDefException, SingularException,
                      Symmetric, UpperTriangular, cholesky, cholesky!, diag,
-                     diagm, dot, eigvals, issuccess, mul!, pinv, qr,
+                     diagm, dot, eigen, eigvals, issuccess, mul!, qr,
                      rank, rmul!, svd, tr
 using PrecompileTools: PrecompileTools, @compile_workload
 using Printf: Printf, @printf, @sprintf
@@ -134,14 +135,15 @@ export islinear, responsename, leverage
 ##############################################################################
 
 """
-    esample(model::Union{OLSEstimator, IVEstimator, FixedEffectModel}, v::AbstractVector)
+    esample(model, v::AbstractVector)
 
-Return a boolean vector indicating which observations in `v` were used in fitting `model`.
-
-# Arguments
-- `model`: A fitted model (OLSEstimator, IVEstimator, or FixedEffectModel)
+The entries of `v`, which has one entry per row of the data `model` was fitted on, in the
+rows of the estimation sample. `model` is an `OLSEstimator`, `IVEstimator`,
+`OLSMatrixEstimator` or `IVMatrixEstimator`.
 """
-function esample(m::Union{OLSEstimator, IVEstimator}, v::AbstractVector)
+function esample(
+        m::Union{OLSEstimator, IVEstimator, OLSMatrixEstimator, IVMatrixEstimator},
+        v::AbstractVector)
     length(v) == length(m.esample) ||
         throw(ArgumentError("Vector length ($(length(v))) must match original data length ($(length(m.esample)))"))
     return v[m.esample]

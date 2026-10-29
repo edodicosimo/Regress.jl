@@ -214,7 +214,7 @@ end
           [-39.2637, -37.48801, -34.38801, -36.09743, -36.97446,
         -43.15547, -41.22573, -40.83648, -34.52427, -28.91617] atol = 1e-4
     @test r2(result) ≈ 0.0968815737054879 atol = 1e-4
-    @test adjr2(result) ≈ 0.0962261902321246 atol = 1e-2  # Small DOF differences
+    @test adjr2(result) ≈ 0.096226189539 atol = 1e-10  # R lm
     @test result.nobs == 1380
     @test result.F ≈ 189.168 atol = 1.0  # Robust Wald F with HC1
 

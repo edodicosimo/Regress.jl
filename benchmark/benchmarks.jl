@@ -14,6 +14,7 @@ using Random
 using StableRNGs
 
 using Regress
+using Regress: ols, iv, fe
 using CovarianceMatrices
 
 # ============================================================================

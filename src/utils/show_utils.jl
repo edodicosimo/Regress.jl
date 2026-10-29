@@ -262,17 +262,9 @@ function vcov_type_name(v::CovarianceMatrices.HAC{<:CovarianceMatrices.Fixed})
     end
 end
 
-function vcov_type_name(v::CovarianceMatrices.HAC)
-    typename = _hac_kernel_name(v)
-    # Data-driven kernels store 0.0: the bandwidth is a property of the estimate,
-    # not the estimator, so it is not available from the specification alone.
-    bw_val = v.bw
-    if bw_val == 0.0
-        return @sprintf("%s(auto)", typename)
-    else
-        return @sprintf("%s(auto: %.2f)", typename, bw_val)
-    end
-end
+# A data-driven kernel selects its bandwidth from the data, so the number is a
+# property of the estimate, not of the estimator; `vcov_type_name(v, V)` reports it.
+vcov_type_name(v::CovarianceMatrices.HAC) = @sprintf("%s(auto)", _hac_kernel_name(v))
 
 """
     vcov_type_name(estimator, V) -> String

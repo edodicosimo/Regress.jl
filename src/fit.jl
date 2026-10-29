@@ -18,16 +18,25 @@ For IV models, use `iv(estimator, df, formula)`.
 
 # Keyword Arguments
 - `contrasts::Dict = Dict()`: Contrast codings for categorical variables
-- `weights::Union{Nothing, Symbol}`: Column name for weights
+- `weights::Union{Nothing, Symbol}`: Column name for weights, finite and nonnegative;
+  rows with zero or missing weight are dropped
 - `save::Symbol = :residuals`: Save residuals (`:residuals`), fixed effects (`:fe`), or both (`:all`)
 - `save_cluster::Union{Symbol, Vector{Symbol}, Nothing}`: Cluster variables to save for post-estimation vcov
 - `dof_add::Integer = 0`: Manual adjustment to degrees of freedom
 - `method::Symbol = :cpu`: Computation method (`:cpu`, `:CUDA`, `:Metal`)
 - `nthreads::Integer`: Number of threads (default: `Threads.nthreads()` for CPU)
 - `double_precision::Bool = true` for CPU, `false` otherwise: Use Float64 vs Float32
-- `tol::Real = 1e-6`: Tolerance for fixed effects demeaning
-- `maxiter::Integer = 10000`: Maximum iterations for fixed effects
-- `drop_singletons::Bool = true`: Drop singleton observations
+- `factorization::Symbol = :auto`: `:chol`, `:qr` or `:sweep`; `:auto` is Cholesky for
+  fewer than 100 coefficients and QR otherwise
+- `collinearity::Symbol = :sweep`: Collinearity detection; `:sweep` drops a column that
+  the earlier ones explain, `:qr` uses QR with column pivoting
+- `collinearity_tol::Real = 1e-8`: Tolerance for collinearity detection
+- `fe_tol::Real = 1e-8`: Tolerance for fixed effects demeaning (formerly `tol`, now
+  deprecated)
+- `fe_maxiter::Integer = 10000`: Maximum iterations for fixed effects demeaning (formerly
+  `maxiter`, now deprecated); failure to converge throws an error
+- `drop_singletons::Bool = true`: Drop the observations of fixed-effect groups with one
+  observation, repeatedly across fixed effects until none is left
 - `progress_bar::Bool = true`: Show progress bar during estimation
 - `subset::Union{Nothing, AbstractVector}`: Select specific rows
 
@@ -110,10 +119,31 @@ design matrices. Compatible with CovarianceMatrices.jl for robust inference.
   - `:auto`: Cholesky for k < 100, QR for k >= 100
   - `:chol`: Faster Cholesky factorization
   - `:qr`: More numerically stable QR factorization
-- `collinearity::Symbol = :qr`: Collinearity detection method (`:qr` or `:sweep`)
-- `tol::Real = 1e-8`: Tolerance for collinearity detection
-- `weights::Union{Nothing, AbstractVector} = nothing`: Observation weights
-- `has_intercept::Bool = true`: Whether model includes an intercept (for R² computation)
+  - `:sweep`: Sweep operator on the cross-product matrix
+- `collinearity::Symbol = :sweep`: Collinearity detection. `:sweep` walks the columns in
+  order and drops a column that the earlier ones explain, as `ols(df, formula)`, the IV
+  fits and fixest do; `:qr` uses QR with column pivoting, which keeps the columns of
+  largest norm first
+- `collinearity_tol::Real = 1e-8`: Tolerance for collinearity detection (formerly `tol`,
+  now deprecated)
+- `weights::Union{Nothing, AbstractVector} = nothing`: Observation weights, finite and
+  nonnegative; rows with zero weight are dropped from the estimation sample
+- `fe = nothing`: Fixed effects to absorb: one grouping vector of length n, or a tuple of
+  them. `y` and the columns of `X` are demeaned on the groups, as `fe(...)` terms do in
+  `ols(df, formula)`, and the absorbed levels enter the degrees of freedom and the
+  cluster-robust small-sample correction. The fixed effects absorb the intercept, so `X`
+  must not contain an intercept column.
+- `fe_tol::Real = 1e-8`, `fe_maxiter::Integer = 10000`: Tolerance and iteration limit of
+  the demeaning; failure to converge throws an error
+- `drop_singletons::Bool = true`: Drop the observations of fixed-effect groups with one
+  observation, repeatedly across fixed effects until none is left, as `ols(df, formula)`
+  and fixest do. A singleton fits its observation exactly, so dropping it leaves the
+  coefficients unchanged and corrects `nobs` and the degrees of freedom.
+- `dof_add::Integer = 0`: Subtracted from the residual degrees of freedom
+- `has_intercept::Bool = fe === nothing`: Whether model includes an intercept (for R²
+  computation); `true` together with `fe` throws an `ArgumentError`
+- `coefnames = nothing`: One name per column of `X`, returned by `coefnames(model)` and
+  shown by `coeftable(model)`; the default is `["x1", ..., "xk"]`
 
 # Returns
 - `OLSMatrixEstimator{T, P, V, C}`: Fitted model with precomputed HC1 standard errors
@@ -166,107 +196,56 @@ See also: [`ols(df, formula)`](@ref), [`OLSMatrixEstimator`](@ref)
 """
 function ols(X::AbstractMatrix{<:Real}, y::AbstractVector{<:Real};
         factorization::Symbol = :auto,
-        collinearity::Symbol = :qr,
-        tol::Real = 1e-8,
+        collinearity::Symbol = :sweep,
+        collinearity_tol::Union{Real, Nothing} = nothing,
+        tol::Union{Real, Nothing} = nothing,
         weights::Union{Nothing, AbstractVector} = nothing,
-        has_intercept::Bool = true)
+        fe = nothing,
+        fe_tol::Real = 1e-8,
+        fe_maxiter::Integer = 10000,
+        drop_singletons::Bool = true,
+        dof_add::Integer = 0,
+        has_intercept::Bool = fe === nothing,
+        coefnames::Union{Nothing, AbstractVector} = nothing)
+    collinearity_tol = _renamed_keyword(collinearity_tol, tol, :collinearity_tol, :tol,
+        :ols, 1e-8)
 
     # Fit is 1-based: X and y are materialized into `Matrix`/`Vector` and indexed
     # positionally. Reject offset axes up front with a clear message rather than
     # failing deep inside the materialization.
     Base.require_one_based_indexing(X, y)
 
-    # Validate inputs
     n, k = size(X)
     length(y) == n ||
         throw(DimensionMismatch("X has $n rows but y has $(length(y)) elements"))
-
-    # Validate keywords
-    factorization in (:auto, :chol, :qr) ||
-        throw(ArgumentError("factorization must be :auto, :chol, or :qr, got :$factorization"))
+    names = _matrix_coefnames(coefnames, k)
+    factorization in (:auto, :chol, :qr, :sweep) ||
+        throw(ArgumentError("factorization must be :auto, :chol, :qr, or :sweep, got :$factorization"))
     collinearity in (:qr, :sweep) ||
         throw(ArgumentError("collinearity must be :qr or :sweep, got :$collinearity"))
 
-    # Determine numeric type
     T = promote_type(eltype(X), eltype(y))
     T <: AbstractFloat || (T = Float64)
 
-    # Convert to Matrix{T} and Vector{T} (materializes views)
-    X_mat = convert(Matrix{T}, X)
-    y_vec = convert(Vector{T}, y)
+    esample, fes, wts = _matrix_sample(n, fe, weights, has_intercept, drop_singletons, T)
 
-    # Handle weights
-    has_weights = weights !== nothing
-    if has_weights
-        length(weights) == n || throw(DimensionMismatch("weights must have length $n"))
-        wts_vec = convert(Vector{T}, weights)
-        sqrtw = sqrt.(wts_vec)
-        X_mat = X_mat .* sqrtw
-        y_vec = y_vec .* sqrtw
-    else
-        wts_vec = T[]
-    end
+    # The kernel demeans and weights in place, so the inputs are copied unless they are
+    # used as given.
+    as_given = isempty(fes) && wts isa UnitWeights && all(esample)
+    X_mat = as_given ? convert(Matrix{T}, X) : Matrix{T}(X[esample, :])
+    y_vec = as_given ? convert(Vector{T}, y) : Vector{T}(y[esample])
 
-    # Choose factorization
-    if factorization == :auto
-        factorization = k < 100 ? :chol : :qr
-    end
+    fit, _ = _fit_ols_kernel(y_vec, X_mat, wts, fes;
+        response_name = :y, coef_names = names, has_intercept,
+        has_fe_intercept = !isempty(fes), factorization, collinearity, collinearity_tol,
+        fe_tol, fe_maxiter, method = :cpu, nthreads = Threads.nthreads(),
+        progress_bar = false, save_fes = false, save_matrices = true, dof_add)
 
-    # Build response object
-    mu = similar(y_vec)
-    rr = OLSResponse(y_vec, mu, wts_vec, T[], :y)
-
-    # Compute TSS (before fitting, for R² calculation)
-    if has_intercept
-        ymean = mean(y_vec)
-        tss = sum(abs2, y_vec .- ymean)
-    else
-        # For models without intercept, TSS = sum(y^2)
-        tss = sum(abs2, y_vec)
-    end
-
-    # Fit using unified solver
-    pp, basis_coef,
-    _ = fit_ols_core!(rr, X_mat, factorization;
-        tol = tol, save_matrices = true, collinearity = collinearity)
-
-    # Compute RSS efficiently
-    rss = compute_rss(rr.y, rr.mu)
-
-    # Degrees of freedom
-    dof_model = sum(basis_coef)
-    dof_res = max(1, n - dof_model)
-
-    # R-squared
-    r2_val = 1 - rss / tss
-
-    # Compute default HC1 vcov and statistics
-    residuals_vcov = rr.y .- rr.mu
-    invXX = invchol(pp)
-
-    vcov_matrix = compute_hc1_vcov_direct(
-        pp.X, residuals_vcov, invXX, basis_coef,
-        n, dof_model, 0, dof_res  # No fixed effects
-    )
-
-    # Standard errors
-    se = sqrt.(diag(vcov_matrix))
-
-    # t-statistics and p-values
-    coef_vec = copy(pp.beta)
-    coef_vec[.!basis_coef] .= zero(T)
-    t_stats = coef_vec ./ se
-    p_values = 2 .* tdistccdf.(dof_res, abs.(t_stats))
-
-    # Default vcov estimator (HC1)
-    default_vcov = CovarianceMatrices.HC1()
-
-    return OLSMatrixEstimator{T, typeof(pp), typeof(default_vcov), typeof(vcov_matrix)}(
-        rr, pp, basis_coef,
-        n, dof_model, dof_res,
-        T(rss), T(tss), T(r2_val), has_intercept,
-        default_vcov, vcov_matrix, se, t_stats, p_values
-    )
+    fe_groups, fe_ngroups = _matrix_fe_groups(fes)
+    return OLSMatrixEstimator(fit.rr, fit.pp, fit.basis_coef,
+        fit.nobs, fit.dof_model, fit.dof_residual,
+        fit.rss, fit.tss_total, fit.r2, has_intercept, names, fe_groups, fe_ngroups,
+        esample, fit.vcov_estimator, fit.vcov_matrix, fit.se, fit.t_stats, fit.p_values)
 end
 
 ##############################################################################
@@ -382,19 +361,40 @@ end
 ##############################################################################
 
 """
-    iv(::TSLS, Z::AbstractMatrix, X::AbstractMatrix, y::AbstractVector;
-       has_intercept::Bool=true, n_endogenous::Int=1) -> IVMatrixEstimator
+    iv(estimator, Z::AbstractMatrix, X::AbstractMatrix, y::AbstractVector;
+       n_endogenous::Int=1, weights=nothing, fe=nothing, drop_singletons=true,
+       dof_add=0, has_intercept::Bool=fe === nothing, coefnames=nothing) -> IVMatrixEstimator
 
-Estimate an IV model using Two-Stage Least Squares with matrix inputs.
+Estimate an IV model with matrix inputs, by Two-Stage Least Squares (`TSLS()`) or a
+k-class estimator (`LIML()`, `Fuller(a)`, `KClass(kappa)`). The estimation is that of
+`iv(estimator, df, formula)`: the same data and settings give identical results, with
+the same treatment of collinear columns (a column that the earlier ones explain is
+dropped; an endogenous regressor that the instruments explain becomes exogenous).
 
 # Arguments
-- `Z::AbstractMatrix`: Instrument matrix, typically [Xexo, Zinstr] where Zinstr are excluded instruments
+- `estimator`: `TSLS()`, `LIML()`, `Fuller(a)` or `KClass(kappa)`
+- `Z::AbstractMatrix`: Instrument matrix [Xexo, Zinstr] where Zinstr are excluded
+  instruments. The k-class estimators require its first columns to equal those of `X`
+  and throw an `ArgumentError` otherwise. For TSLS, when they do not, every column of
+  `Z` is an excluded instrument, and columns of `Z` that repeat exogenous regressors are
+  dropped as collinear.
 - `X::AbstractMatrix`: Regressor matrix, typically [Xexo, Xendo] where Xendo are endogenous variables
 - `y::AbstractVector`: Response vector
 
 # Keyword Arguments
-- `has_intercept::Bool=true`: Whether the model includes an intercept (affects DOF calculation)
 - `n_endogenous::Int=1`: Number of endogenous variables (last n_endogenous columns of X)
+- `weights=nothing`: Observation weights, finite and nonnegative; rows with zero weight
+  are dropped from the estimation sample
+- `fe=nothing`, `fe_tol=1e-8`, `fe_maxiter=10000`: Fixed effects to absorb, as in
+  [`ols(X, y)`](@ref); `y` and the columns of `X` and `Z` are demeaned on the groups.
+  `first_stage` and `weakivtest` count the absorbed levels.
+- `drop_singletons=true`: Drop fixed-effect singletons, as in [`ols(X, y)`](@ref)
+- `dof_add=0`: Subtracted from the residual degrees of freedom
+- `has_intercept::Bool=fe === nothing`: Whether the model includes an intercept (for R²
+  computation); `true` together with `fe` throws an `ArgumentError`
+- `coefnames=nothing`: One name per column of `X`, returned by `coefnames(model)` and
+  shown by `coeftable(model)`; the default is `["x1", ..., "xk"]`. `first_stage(model)`
+  names the endogenous variables and the exogenous regressors from it.
 
 # Returns
 - `IVMatrixEstimator{T}`: Fitted IV model supporting `coef()`, `vcov()`, `model + vcov()`, etc.
@@ -406,6 +406,17 @@ The TSLS estimator is computed as:
 \\hat{\\beta}_{TSLS} = (X'P_Z X)^{-1} X'P_Z y
 ```
 where ``P_Z = Z(Z'Z)^{-1}Z'`` is the projection matrix onto the instrument space.
+
+A k-class estimator solves
+```math
+\\hat{\\beta}_\\kappa = (X'X - \\kappa X'M_Z X)^{-1} (X'y - \\kappa X'M_Z y)
+```
+with ``M_Z = I - P_Z``; ``\\kappa`` is the LIML eigenvalue for `LIML()`, that eigenvalue
+minus ``a/(n - L - p)`` for `Fuller(a)` (``L`` excluded instruments, ``p`` exogenous
+regressors), and `kappa` for `KClass(kappa)`, as in the formula fits. The sandwich
+variance replaces ``\\hat X`` by ``X - \\kappa M_Z X`` and ``(\\hat X'\\hat X)^{-1}`` by
+``(X'X - \\kappa X'M_Z X)^{-1}``. `first_stage` and `weakivtest` depend only on the data
+and the variance estimator, not on the second-stage estimator.
 
 # Example
 ```julia
@@ -433,10 +444,18 @@ model_robust = model + vcov(HC1())
 
 See also: [`iv(::TSLS, df, formula)`](@ref), [`IVMatrixEstimator`](@ref)
 """
-function iv(estimator::TSLS, Z::AbstractMatrix{<:Real}, X::AbstractMatrix{<:Real},
+function iv(estimator::AbstractIVEstimator, Z::AbstractMatrix{<:Real},
+        X::AbstractMatrix{<:Real},
         y::AbstractVector{<:Real};
-        has_intercept::Bool = true,
-        n_endogenous::Int = 1)
+        n_endogenous::Int = 1,
+        weights::Union{Nothing, AbstractVector} = nothing,
+        fe = nothing,
+        fe_tol::Real = 1e-8,
+        fe_maxiter::Integer = 10000,
+        drop_singletons::Bool = true,
+        dof_add::Integer = 0,
+        has_intercept::Bool = fe === nothing,
+        coefnames::Union{Nothing, AbstractVector} = nothing)
 
     # Fit is 1-based: Z, X, y are materialized into `Matrix`/`Vector` and indexed
     # positionally. Reject offset axes up front with a clear message rather than
@@ -452,6 +471,7 @@ function iv(estimator::TSLS, Z::AbstractMatrix{<:Real}, X::AbstractMatrix{<:Real
     n_endogenous >= 0 || throw(ArgumentError("n_endogenous must be non-negative"))
     n_endogenous <= size(X, 2) ||
         throw(ArgumentError("n_endogenous ($n_endogenous) > number of X columns ($(size(X,2)))"))
+    names = _matrix_coefnames(coefnames, size(X, 2))
 
     # Check order condition
     k_x = size(X, 2)
@@ -460,111 +480,70 @@ function iv(estimator::TSLS, Z::AbstractMatrix{<:Real}, X::AbstractMatrix{<:Real
     k_instr = k_z - k_exo  # Excluded instruments
     k_instr >= n_endogenous || throw(ArgumentError(
         "Not enough instruments: $k_instr excluded instruments < $n_endogenous endogenous variables"))
+    _check_matrix_iv_layout(estimator, Z, X, k_exo)
 
-    # Determine numeric type
     T = promote_type(eltype(X), eltype(Z), eltype(y))
     T <: AbstractFloat || (T = Float64)
+    esample, fes, wts = _matrix_sample(n, fe, weights, has_intercept, drop_singletons, T)
 
-    # Convert to concrete types
-    X_mat = convert(Matrix{T}, X)
-    Z_mat = convert(Matrix{T}, Z)
-    y_vec = convert(Vector{T}, y)
+    # The excluded instruments: the columns of Z after its copy of the exogenous
+    # regressors, or all of Z when it does not lead with them (TSLS only).
+    leads_with_exo = view(Z, :, 1:k_exo) == view(X, :, 1:k_exo)
+    instr_cols = leads_with_exo ? ((k_exo + 1):k_z) : (1:k_z)
+    Xexo = Matrix{T}(X[esample, 1:k_exo])
+    Xendo = Matrix{T}(X[esample, (k_exo + 1):k_x])
+    Zinstr = Matrix{T}(Z[esample, instr_cols])
+    y_vec = Vector{T}(y[esample])
 
-    # Compute projection matrix P_Z = Z(Z'Z)^{-1}Z'
-    ZZ = Z_mat' * Z_mat
-    ZZ_chol = try
-        cholesky(Symmetric(ZZ))
-    catch e
-        throw(ArgumentError("Instrument matrix Z is rank deficient or nearly singular"))
-    end
-    # Projected regressors: X̂ = P_Z * X = Z * (Z'Z)^{-1} * Z' * X
-    ZX = Z_mat' * X_mat
-    X_hat = Z_mat * (ZZ_chol \ ZX)
+    fit, _ = _iv_kernel(estimator, y_vec, Xexo, Xendo, Zinstr, wts, fes;
+        response_name = :y, coefnames_exo = names[1:k_exo],
+        coefnames_endo = names[(k_exo + 1):k_x],
+        coefnames_iv = ["z$i" for i in eachindex(instr_cols)],
+        has_intercept, has_fe_intercept = !isempty(fes), fe_tol, fe_maxiter,
+        method = :cpu, nthreads = Threads.nthreads(), progress_bar = false,
+        save_fes = false, dof_add, first_stage = false)
 
-    # TSLS estimator: β = (X̂'X)^{-1} X̂'y = (X'P_Z X)^{-1} X'P_Z y
-    # Using X̂'X = X'P_Z X and X̂'y = X'P_Z y
-    XhatX = X_hat' * X_mat
-    Xhaty = X_hat' * y_vec
-
-    XhatX_chol = try
-        cholesky(Symmetric(XhatX))
-    catch e
-        throw(ArgumentError("X̂'X is singular - check for perfect collinearity"))
-    end
-
-    beta = XhatX_chol \ Xhaty
-
-    # For vcov, we need (X̂'X̂)^{-1}, not (X̂'X)^{-1}
-    XhatXhat = X_hat' * X_hat
-    XhatXhat_chol = try
-        cholesky(Symmetric(XhatXhat))
-    catch
-        # Fall back to pseudo-inverse
-        Symmetric(pinv(XhatXhat))
-    end
-    invXhatXhat = if XhatXhat_chol isa Cholesky
-        Symmetric(XhatXhat_chol \ I)
-    else
-        XhatXhat_chol  # Already a matrix from pinv
-    end
-
-    # Residuals
-    residuals = y_vec - X_mat * beta
-
-    # Degrees of freedom
-    k = size(X_mat, 2)
-    basis_coef = trues(k)  # No collinearity detection for simplicity
-    dof_model = sum(basis_coef)
-    dof_res = max(1, n - dof_model)
-
-    # Sum of squares
-    rss = sum(abs2, residuals)
-    ymean = mean(y_vec)
-    tss = has_intercept ? sum(abs2, y_vec .- ymean) : sum(abs2, y_vec)
-    r2_val = 1 - rss / tss
-
-    # Post-estimation data for vcov
+    fe_groups, fe_ngroups = _matrix_fe_groups(fes)
     postestimation = PostEstimationDataIVMatrix{T}(
-        X_mat, Z_mat, X_hat, y_vec, residuals, Matrix{T}(invXhatXhat), n_endogenous
-    )
-
-    # Default vcov (HC1)
+        fit.X, fit.Z, fit.Xhat, fit.y, fit.residuals, Matrix(fit.bread), fit.endo_cols,
+        wts isa UnitWeights ? T[] : collect(wts))
     default_vcov = CovarianceMatrices.HC1()
-
-    # Compute HC1 variance-covariance matrix
-    # Sandwich: V = n * (X̂'X̂)^{-1} * (X̂'diag(e²)X̂ * n/(n-k)) / n * (X̂'X̂)^{-1}
-    #           = (n/(n-k)) * (X̂'X̂)^{-1} * X̂'diag(e²)X̂ * (X̂'X̂)^{-1}
-    scale_hc1 = T(n) / T(n - k)
-    Xe = X_hat .* residuals
-    # Form the sandwich as B*B' (B = (X̂'X̂)⁻¹ X̂'diag(e)) so it is PSD even when X̂'X̂ is nearly
-    # singular (weak first stage): A*M*A can then have negative diagonal entries from cancellation.
-    B_hc1 = invXhatXhat * Xe'
-    vcov_matrix = Symmetric(scale_hc1 .* (B_hc1 * B_hc1'))
-
-    # Standard errors, t-stats, p-values
-    se = sqrt.(diag(vcov_matrix))
-    t_stats = beta ./ se
-    p_values = 2 .* tdistccdf.(dof_res, abs.(t_stats))
-
     return IVMatrixEstimator{T, typeof(estimator), typeof(default_vcov),
-        typeof(vcov_matrix)}(
-        estimator,
-        beta,
-        postestimation,
-        basis_coef,
-        n,
-        dof_model,
-        dof_res,
-        T(rss),
-        T(tss),
-        T(r2_val),
-        has_intercept,
-        default_vcov,
-        vcov_matrix,
-        se,
-        t_stats,
-        p_values
-    )
+        typeof(fit.vcov_matrix)}(
+        estimator, fit.coef, postestimation, fit.basis_coef,
+        fit.nobs, fit.dof_model, fit.dof_residual,
+        fit.rss, fit.tss_total, T(1 - fit.rss / fit.tss_total),
+        has_intercept, names, fe_groups, fe_ngroups, esample,
+        default_vcov, fit.vcov_matrix, fit.se, fit.t_stats, fit.p_values)
+end
+
+# The kernel of each IV estimator.
+_iv_kernel(::TSLS, args...; kwargs...) = _fit_tsls_kernel(args...; kwargs...)
+function _iv_kernel(estimator::AbstractIVEstimator, args...; kwargs...)
+    return _fit_kclass_kernel(estimator, args...; kwargs...)
+end
+
+# The k-class fit separates the exogenous regressors from the excluded instruments, so
+# it needs Z = [Xexo, Zinstr] with the same leading columns as X.
+_check_matrix_iv_layout(::TSLS, Z, X, k_exo) = nothing
+function _check_matrix_iv_layout(estimator::AbstractIVEstimator, Z, X, k_exo)
+    view(Z, :, 1:k_exo) == view(X, :, 1:k_exo) || throw(ArgumentError(
+        "$(_estimator_name(estimator)) needs Z = [Xexo, Zinstr] and X = [Xexo, Xendo] " *
+        "with the same first $k_exo (exogenous) columns"))
+    return nothing
+end
+
+# Pivoted QR of `A`; throws `ArgumentError(msg)` when `A` has numerical rank below its
+# column count, that is, when a diagonal entry of R is at most `tol` times the largest,
+# the rule `detect_collinearity_qr` applies. A tolerance, rather than a failed Cholesky
+# factorization of `A'A`, decides singularity: an exactly collinear `A` can leave a
+# small positive pivot after rounding, depending on the BLAS kernel.
+function _full_rank_qr(A, msg; tol = 1e-8)
+    F = qr(A, ColumnNorm())
+    R_diag = abs.(diag(F.R))
+    threshold = isempty(R_diag) ? zero(eltype(R_diag)) : maximum(R_diag) * tol
+    count(>(threshold), R_diag) == size(A, 2) || throw(ArgumentError(msg))
+    return F
 end
 
 """

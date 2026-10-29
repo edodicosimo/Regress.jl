@@ -97,6 +97,18 @@ struct OLSEstimator{T <: AbstractFloat, P <: OLSLinearPredictor{T}, V,
     p::T                            # P-value of F-stat
 end
 
+# See the `OLSMatrixEstimator` outer constructor.
+function OLSEstimator(rr::OLSResponse{T}, pp::OLSLinearPredictor{T}, fes, formula,
+        formula_schema, contrasts, esample, coefnames, basis_coef, nobs, dof, dof_fes,
+        dof_residual, tss_total, tss_partial, rss, r2, r2_within, has_intercept,
+        vcov_estimator, vcov_matrix::AbstractMatrix{T}, se, t_stats, p_values, F,
+        p) where {T}
+    return OLSEstimator{T, typeof(pp), typeof(vcov_estimator), typeof(vcov_matrix)}(
+        rr, pp, fes, formula, formula_schema, contrasts, esample, coefnames, basis_coef,
+        nobs, dof, dof_fes, dof_residual, tss_total, tss_partial, rss, r2, r2_within,
+        has_intercept, vcov_estimator, vcov_matrix, se, t_stats, p_values, F, p)
+end
+
 has_iv(::OLSEstimator) = false
 has_fe(m::OLSEstimator) = has_fe(m.formula)
 dof_fes(m::OLSEstimator) = m.dof_fes
@@ -133,6 +145,12 @@ Use `ols(X, y)` to fit this model type.
 - `tss::T`: Total sum of squares
 - `r2::T`: R-squared
 - `has_intercept::Bool`: Whether model has intercept (assumed from first column)
+- `coefnames::Vector{String}`: Coefficient names, one per column of `X`
+- `fe_groups::Vector{Vector{Int}}`: Group codes of each absorbed fixed effect (empty
+  without fixed effects)
+- `fe_ngroups::Vector{Int}`: Number of levels of each absorbed fixed effect
+- `esample::BitVector`: Which rows of `X` and `y` are in the estimation sample (rows with
+  zero weight and fixed-effect singletons are not)
 - `vcov_estimator::V`: Variance-covariance estimator used to compute `vcov_matrix`
 - `vcov_matrix::C`: Precomputed variance-covariance matrix
 - `se::Vector{T}`: Standard errors
@@ -168,6 +186,10 @@ struct OLSMatrixEstimator{T <: AbstractFloat, P <: OLSLinearPredictor{T}, V,
     tss::T                          # Total sum of squares
     r2::T                           # R-squared
     has_intercept::Bool             # Whether model has intercept
+    coefnames::Vector{String}       # One name per column of X
+    fe_groups::Vector{Vector{Int}}  # Group codes of each absorbed fixed effect
+    fe_ngroups::Vector{Int}         # Number of levels of each absorbed fixed effect
+    esample::BitVector              # Rows of the input in the estimation sample
 
     # Variance-covariance estimator and precomputed statistics
     vcov_estimator::V                        # Estimator used to compute vcov_matrix
@@ -177,10 +199,83 @@ struct OLSMatrixEstimator{T <: AbstractFloat, P <: OLSLinearPredictor{T}, V,
     p_values::Vector{T}                      # p-values
 end
 
+# The predictor type depends on the factorization chosen at run time; taking the type
+# parameters from the arguments lets a caller holding a `Union` of predictors split on it.
+function OLSMatrixEstimator(rr::OLSResponse{T}, pp::OLSLinearPredictor{T}, basis_coef,
+        nobs, dof, dof_residual, rss, tss, r2, has_intercept, coefnames, fe_groups,
+        fe_ngroups, esample, vcov_estimator, vcov_matrix::AbstractMatrix{T}, se, t_stats,
+        p_values) where {T}
+    return OLSMatrixEstimator{T, typeof(pp), typeof(vcov_estimator), typeof(vcov_matrix)}(
+        rr, pp, basis_coef, nobs, dof, dof_residual, rss, tss, r2, has_intercept,
+        coefnames, fe_groups, fe_ngroups, esample, vcov_estimator, vcov_matrix, se,
+        t_stats, p_values)
+end
+
 has_iv(::OLSMatrixEstimator) = false
-has_fe(::OLSMatrixEstimator) = false
-dof_fes(::OLSMatrixEstimator) = 0
+has_fe(m::OLSMatrixEstimator) = !isempty(m.fe_groups)
+dof_fes(m::OLSMatrixEstimator) = _fe_dof(m.fe_ngroups, length(m.fe_ngroups))
 model_hasintercept(m::OLSMatrixEstimator) = m.has_intercept
+
+# Names of a matrix fit's coefficients: the `coefnames` keyword, or `x1, ..., xk`.
+function _matrix_coefnames(names, k::Integer)
+    names === nothing && return ["x$i" for i in 1:k]
+    length(names) == k || throw(DimensionMismatch(
+        "coefnames has $(length(names)) names but the design matrix has $k columns"))
+    return String[string(n) for n in names]
+end
+
+# The fixed effects of a matrix fit's `fe` keyword: `nothing`, one grouping vector of
+# length `n`, or a tuple (or vector) of them.
+function _matrix_fixedeffects(fe, n::Integer, has_intercept::Bool)
+    fe === nothing && return FixedEffect[]
+    has_intercept && throw(ArgumentError(
+        "has_intercept = true with absorbed fixed effects: the fixed effects absorb " *
+        "the intercept, so drop the intercept column from the design and pass " *
+        "has_intercept = false (the default with `fe`)"))
+    groups = fe isa Tuple || (fe isa AbstractVector && !isempty(fe) &&
+              all(g -> g isa AbstractVector, fe)) ? fe : (fe,)
+    isempty(groups) && throw(ArgumentError("`fe` names no fixed effects"))
+    fes = FixedEffect[]
+    for (j, g) in enumerate(groups)
+        g isa AbstractVector || throw(ArgumentError(
+            "fixed effect $j must be a vector of group identifiers, got $(typeof(g))"))
+        Base.require_one_based_indexing(g)
+        length(g) == n || throw(DimensionMismatch(
+            "fixed effect $j has $(length(g)) observations but y has $n"))
+        any(ismissing, g) && throw(ArgumentError("fixed effect $j has missing values"))
+        push!(fes, FixedEffect(g))
+    end
+    return fes
+end
+
+# The estimation sample (a `BitVector` over the n input rows), the fixed effects on it and
+# the weights on it of a matrix fit. Rows with zero weight are dropped, then, when
+# `drop_singletons`, fixed-effect singletons, by the rule `prepare_data` applies.
+function _matrix_sample(n::Integer, fe, weights, has_intercept::Bool,
+        drop_singletons::Bool, ::Type{T}) where {T}
+    fes = _matrix_fixedeffects(fe, n, has_intercept)
+    esample = trues(n)
+    if weights !== nothing
+        Base.require_one_based_indexing(weights)
+        length(weights) == n ||
+            throw(DimensionMismatch("weights has $(length(weights)) elements but y has $n"))
+        _check_weights(weights, "`weights`")
+        esample .&= weights .> 0
+    end
+    if drop_singletons && !isempty(fes)
+        drop_singletons!(esample, fes, Threads.nthreads())
+    end
+    nobs = count(esample)
+    nobs > 0 || throw(ArgumentError("sample is empty"))
+    all(esample) || (fes = FixedEffect[fe[esample] for fe in fes])
+    wts = weights === nothing ? uweights(nobs) : Weights(Vector{T}(weights[esample]))
+    return esample, fes, wts
+end
+
+# Group codes and number of levels of each fixed effect, as `_cluster_dof` reads them.
+function _matrix_fe_groups(fes)
+    return Vector{Int}[Vector{Int}(fe.refs) for fe in fes], Int[nunique(fe) for fe in fes]
+end
 
 """
     has_matrices(m::OLSMatrixEstimator) -> Bool
@@ -201,28 +296,29 @@ function StatsAPI.coef(m::OLSMatrixEstimator)
     beta[.!m.basis_coef] .= zero(eltype(beta))
     return beta
 end
+StatsAPI.coefnames(m::OLSMatrixEstimator) = m.coefnames
 
 function StatsAPI.response(m::OLSMatrixEstimator)
     has_response_data(m.rr) ||
-        error("Response vector not stored.")
+        throw(ArgumentError("Response vector not stored."))
     return m.rr.y
 end
 
 function StatsAPI.fitted(m::OLSMatrixEstimator)
     has_response_data(m.rr) ||
-        error("Fitted values not stored.")
+        throw(ArgumentError("Fitted values not stored."))
     return m.rr.mu
 end
 
 function StatsAPI.modelmatrix(m::OLSMatrixEstimator)
     has_predictor_data(m.pp) ||
-        error("Model matrix not stored.")
+        throw(ArgumentError("Model matrix not stored."))
     return m.pp.X
 end
 
 function StatsAPI.residuals(m::OLSMatrixEstimator)
     has_response_data(m.rr) ||
-        error("Response vector not stored. Cannot compute residuals.")
+        throw(ArgumentError("Response vector not stored. Cannot compute residuals."))
     resid = m.rr.y .- m.rr.mu
     # Unweight residuals if model was estimated with weights
     if isweighted(m.rr)
@@ -252,10 +348,9 @@ StatsAPI.stderror(m::OLSMatrixEstimator) = m.se
 # Adjusted R2 - kept specialized because AbstractRegressModel relies on formula()
 function StatsAPI.adjr2(m::OLSMatrixEstimator)
     n = nobs(m)
-    k = dof(m)
     dev = deviance(m)
     dev0 = nulldeviance(m)
-    return 1 - (dev * (n - m.has_intercept)) / (dev0 * max(n - k, 1))
+    return 1 - (dev * (n - (m.has_intercept | has_fe(m)))) / (dev0 * dof_residual(m))
 end
 
 ##############################################################################
@@ -276,8 +371,8 @@ function Base.:+(m::OLSMatrixEstimator{T, P, V1}, v::VcovSpec{V2}) where {T, P, 
     return OLSMatrixEstimator{T, P, V2, typeof(vcov_mat)}(
         m.rr, m.pp, m.basis_coef,
         m.nobs, m.dof, m.dof_residual,
-        m.rss, m.tss, m.r2, m.has_intercept,
-        v.source, vcov_mat, se, t_stats, p_values
+        m.rss, m.tss, m.r2, m.has_intercept, m.coefnames, m.fe_groups, m.fe_ngroups,
+        m.esample, v.source, vcov_mat, se, t_stats, p_values
     )
 end
 
@@ -317,26 +412,26 @@ StatsAPI.responsename(m::OLSEstimator) = m.rr.response_name
 
 function StatsAPI.response(m::OLSEstimator)
     has_response_data(m.rr) ||
-        error("Response vector not stored. Model was fit with save=:minimal.")
+        throw(ArgumentError("Response vector not stored. Model was fit with save=:minimal."))
     return m.rr.y
 end
 
 function StatsAPI.fitted(m::OLSEstimator)
     has_response_data(m.rr) ||
-        error("Fitted values not stored. Model was fit with save=:minimal.")
+        throw(ArgumentError("Fitted values not stored. Model was fit with save=:minimal."))
     return m.rr.mu
 end
 
 function StatsAPI.modelmatrix(m::OLSEstimator)
     has_predictor_data(m.pp) ||
-        error("Model matrix not stored. Model was fit with save=:minimal.")
+        throw(ArgumentError("Model matrix not stored. Model was fit with save=:minimal."))
     return m.pp.X
 end
 
 # Residuals (compute from y - mu, unweighted)
 function StatsAPI.residuals(m::OLSEstimator)
     has_response_data(m.rr) ||
-        error("Response vector not stored. Model was fit with save=:minimal. Cannot compute residuals.")
+        throw(ArgumentError("Response vector not stored. Model was fit with save=:minimal. Cannot compute residuals."))
     resid = m.rr.y .- m.rr.mu
     # Unweight residuals if model was estimated with weights
     if isweighted(m.rr)
@@ -463,35 +558,6 @@ function fe(m::OLSEstimator; keepkeys = false)
     else
         m.fes.fe[!, (length(m.fes.fe_names) + 1):end]
     end
-end
-
-function StatsAPI.coeftable(m::OLSEstimator; level = 0.95)
-    cc = coef(m)
-    se = stderror(m)
-    tt = t_stats(m)
-    pv = p_values(m)
-    coefnms = coefnames(m)
-
-    # Compute confidence intervals using precomputed se
-    scale = tdistinvcdf(dof_residual(m), 1 - (1 - level) / 2)
-    conf_int = hcat(cc .- scale .* se, cc .+ scale .* se)
-
-    # put (intercept) last
-    if !isempty(coefnms) &&
-       ((coefnms[1] == Symbol("(Intercept)")) || (coefnms[1] == "(Intercept)"))
-        newindex = vcat(2:length(cc), 1)
-        cc = cc[newindex]
-        se = se[newindex]
-        tt = tt[newindex]
-        pv = pv[newindex]
-        conf_int = conf_int[newindex, :]
-        coefnms = coefnms[newindex]
-    end
-
-    CoefTable(
-        hcat(cc, se, tt, pv, conf_int[:, 1:2]),
-        ["Estimate", "Std. Error", "t-stat", "Pr(>|t|)", "Lower 95%", "Upper 95%"],
-        ["$(coefnms[i])" for i in 1:length(cc)], 4)
 end
 
 ##############################################################################
