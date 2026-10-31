@@ -104,10 +104,7 @@ function BinaryResponse(yi, pp::BinaryPredictorQR, responsename, link::Link = Pr
         similar(yi), # offset
         responsename
     )
-    inverse_link!(rr)
-    rr.resid .= rr.y .- rr.mu
-    rr.deviance_contributions .= deviance_bernoulli.(rr.y, rr.mu, rr.one_minus_mu)
-    rr.deviance = sum(rr.deviance_contributions)
+    rr.deviance = refresh_response!(rr)
     return rr
 end
 
@@ -119,8 +116,8 @@ end
 Bernoulli model storage used by `glmfe` for probit and logit fitting. Combine a
 `BinaryResponse`, a `BinaryPredictorQR`, formula metadata, and parameter counts.
 
-A returned model can represent either a converged fit or the last iterate
-at the iteration limit. The concrete response type preserves its link parameter for specialization.
+Fitting returns a model only when the deviance convergence criterion is met.
+The concrete response type preserves its link parameter for specialization.
 
 `esample` is a Boolean mask over the original input rows. `drop_reasons` has
 one symbol per input row: `:none` for retained rows, `:fe_all_zero` or
@@ -204,7 +201,7 @@ function StatsAPI.response(m::BinaryEstimator)
 end
 
 function StatsAPI.residuals(m::BinaryEstimator)
-    m.rr.y - m.rr.mu
+    copy(m.rr.resid)
 end
 
 function StatsAPI.modelmatrix(m::BinaryEstimator)

@@ -555,8 +555,8 @@ use `fe(...)` terms in `formula` to absorb fixed effects.
 
 `beta0=nothing` starts coefficients at zero. Without fixed effects the design
 includes an added intercept, which must also be included in a supplied `beta0`.
-Stop after `max_iter` iterations or when the relative deviance change is below
-`tolerance`. Reaching the iteration limit returns the last iterate.
+Stop when the relative deviance change is below `tolerance`.
+Reaching `max_iter` without convergence raises an error.
 
 Equivalent to `glmfe(formula, df; link=ProbitLink(), ...)`.
 See [`glmfe`](@ref) for the convergence criterion and fitting details.
@@ -586,8 +586,12 @@ group filter.
 
 `beta0=nothing` starts at zero. Without fixed effects an intercept is prepended
 to the design and must be included in a supplied coefficient vector. Stop when
-`abs(Dnew - Dold) / (0.1 + abs(Dnew)) < tolerance`, or return the last iterate
-after `max_iter` iterations. Step-halving attempts to reduce candidate deviance.
+`abs(Dnew - Dold) / (0.1 + abs(Dnew)) < tolerance`. Step-halving shrinks slope
+and fixed-effect updates together to obtain a finite, non-increasing deviance.
+Failure of step-halving, fixed-effect absorption, or convergence within
+`max_iter` raises an error. Working quantities outside the representable
+floating-point range raise a `DomainError`; probabilities are not clipped.
+`max_iter` must be positive and `tolerance` must be finite and positive.
 
 # Examples
 ```julia

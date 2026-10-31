@@ -17,7 +17,8 @@
     ws = GLMWorkspace(m.pp.X)
     @test ws isa GLMWorkspace
 
-    _glm_irls!(m, ws, nothing, false, 1, 1e-10)
+    @test_throws "Fisher scoring did not converge in 1 iterations" _glm_irls!(
+        m, ws, nothing, false, 1, 1e-10)
 
     # At eta = 0, mu = 1/2 and phi(eta) = 1/sqrt(2pi).
     derivative = inv(sqrt(2pi))
