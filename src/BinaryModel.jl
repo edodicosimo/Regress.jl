@@ -121,6 +121,12 @@ Bernoulli model storage used by `glmfe` for probit and logit fitting. Combine a
 
 A returned model can represent either a converged fit or the last iterate
 at the iteration limit. The concrete response type preserves its link parameter for specialization.
+
+`esample` is a Boolean mask over the original input rows. `drop_reasons` has
+one symbol per input row: `:none` for retained rows, `:fe_all_zero` or
+`:fe_all_one` for rows removed from constant-outcome fixed-effect groups.
+Response and predictor buffers, `fitted`, `residuals`, and `nobs` describe
+only the retained estimation sample.
 """
 mutable struct BinaryEstimator{T <: AbstractFloat, R <: BinaryResponse{T}} <:
                AbstractRegressModel
@@ -142,6 +148,21 @@ mutable struct BinaryEstimator{T <: AbstractFloat, R <: BinaryResponse{T}} <:
 
     coefnames::Vector{String}
     basis_coef::BitVector
+    esample::BitVector
+    drop_reasons::Vector{Symbol}
+end
+
+function BinaryEstimator{T, R}(rr, pp, formula, formula_schema, formula_fes,
+        n_observations, n_parameters, deviance, nulldeviance, has_fixed_effects,
+        fixed_effects_dof, coefnames, basis_coef) where {T, R <: BinaryResponse{T}}
+    return BinaryEstimator{T, R}(rr, pp, formula, formula_schema, formula_fes,
+        n_observations, n_parameters, deviance, nulldeviance, has_fixed_effects,
+        fixed_effects_dof, coefnames, basis_coef, trues(length(rr.y)),
+        fill(:none, length(rr.y)))
+end
+
+function BinaryEstimator(rr::BinaryResponse{T}, args::Vararg{Any, 12}) where {T}
+    return BinaryEstimator{T}(rr, args...)
 end
 
 # Preserve construction with only the numeric type specified.
@@ -153,6 +174,13 @@ has_iv(::BinaryEstimator) = false
 has_fe(m::BinaryEstimator) = has_fe(m.formula_fes)
 
 basis_coef(m::BinaryEstimator) = m.basis_coef
+
+function esample(m::BinaryEstimator, v::AbstractVector)
+    Base.require_one_based_indexing(v)
+    length(v) == length(m.esample) ||
+        throw(ArgumentError("Vector length ($(length(v))) must match original data length ($(length(m.esample)))"))
+    return v[m.esample]
+end
 
 StatsAPI.islinear(::BinaryEstimator) = false
 StatsAPI.coefnames(m::BinaryEstimator) = m.coefnames
@@ -205,6 +233,10 @@ function _binary_summary_table(m::BinaryEstimator)
            "Null deviance" _format_binary_summary_value(nulldeviance(m));
            "Pseudo R² (McFadden)" _format_binary_summary_value(r2(m));]
 
+    removed = count(!, m.esample)
+    if removed > 0
+        out = vcat(out, ["Observations removed" string(removed)])
+    end
     if has_fe(m)
         out = vcat(out,
             ["Fixed effects" "yes";

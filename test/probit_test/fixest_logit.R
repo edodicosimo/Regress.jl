@@ -34,12 +34,12 @@ df$visit_dummy <- as.integer(df$docvis > 0)
 formula_fixest <- visit_dummy ~ age + hhninc + hhkids + educ + married | id + year
 
 # Warmup: avoid measuring package/method initialization.
-model <- feglm(formula_fixest, data = df, family = binomial(link = "logit"))
+model <- feglm(formula_fixest, data = df, family = binomial(link = "logit"), glm.tol = 1e-10)
 
 times <- replicate(samples, {
   gc()
   system.time(
-    feglm(formula_fixest, data = df, family = binomial(link = "logit"))
+    feglm(formula_fixest, data = df, family = binomial(link = "logit"), glm.tol = 1e-10)
   )[["elapsed"]]
 })
 

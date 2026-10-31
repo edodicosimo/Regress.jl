@@ -575,6 +575,15 @@ Use `ProbitLink()` for probit or `LogitLink()` for logistic regression. The
 response must contain only zeros and ones; other response families are not
 currently supported.
 
+Observations in fixed-effect intercept groups with only zeros or only ones
+are removed recursively, including groups that become constant after other
+groups are removed. These groups have infinite intercept estimates and do
+not identify slopes in the profiled likelihood. The returned model stores
+an `esample` mask and `drop_reasons` over the original rows. `nobs`, `fitted`,
+`response`, and `residuals` refer to the retained sample. An empty retained
+sample raises an error. Other forms of separation are not detected by this
+group filter.
+
 `beta0=nothing` starts at zero. Without fixed effects an intercept is prepended
 to the design and must be included in a supplied coefficient vector. Stop when
 `abs(Dnew - Dold) / (0.1 + abs(Dnew)) < tolerance`, or return the last iterate

@@ -79,6 +79,10 @@ end
 
         @test regress_vector≈fixest_vector rtol=5e-5 atol=1e-6
 
+        @test rows_by_name(regress, "meta")["nobs"] == rows_by_name(fixest, "meta")["nobs"]
+        @test rows_by_name(regress, "meta")["loglikelihood"] ≈
+              rows_by_name(fixest, "meta")["loglikelihood"] atol=1e-4
+
         @test isfinite(fixest_time["median_seconds"])
         @test isfinite(regress_time["median_seconds"])
         @test fixest_time["median_seconds"] > 0
@@ -121,6 +125,10 @@ end
         regress_vector = [regress_coef[name] for name in common_coef_names]
 
         @test regress_vector≈fixest_vector rtol=5e-5 atol=1e-6
+
+        @test rows_by_name(regress, "meta")["nobs"] == rows_by_name(fixest, "meta")["nobs"]
+        @test rows_by_name(regress, "meta")["loglikelihood"] ≈
+              rows_by_name(fixest, "meta")["loglikelihood"] atol=1e-4
 
         @test isfinite(fixest_time["median_seconds"])
         @test isfinite(regress_time["median_seconds"])

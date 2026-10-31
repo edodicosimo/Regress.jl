@@ -97,6 +97,48 @@ function get_coefficient_names_nofe(formula::FormulaTerm, data::DataFrame)
     return (Symbol(response_name), coef_names_str)
 end
 
+# Constant-outcome intercept groups have unbounded fixed effects (see #25).
+function _binary_sample(y::AbstractVector, fes)
+    Base.require_one_based_indexing(y)
+    for yi in y
+        yi in (0, 1) || throw(DomainError(yi, "Bernoulli response must be zero or one"))
+    end
+    sample = trues(length(y))
+    reasons = fill(:none, length(y))
+    intercept_fes = filter(fe -> fe.interaction isa UnitWeights, fes)
+    caches = [zeros(UInt8, fe.n) for fe in intercept_fes]
+    while true
+        removed = 0
+        for (fe, cache) in zip(intercept_fes, caches)
+            removed += _drop_binary_separated!(sample, reasons, y, fe, cache)
+        end
+        removed == 0 && return sample, reasons
+    end
+end
+
+function _drop_binary_separated!(sample, reasons, y, fe::FixedEffect, cache)
+    refs = fe.refs
+    fill!(cache, 0)
+    # The two bits record whether a retained group contains zeros and ones.
+    for i in eachindex(sample, y, refs)
+        if sample[i]
+            cache[refs[i]] |= y[i] == 0 ? 0x01 : 0x02
+        end
+    end
+    removed = 0
+    for i in eachindex(sample, reasons, refs)
+        if sample[i]
+            state = cache[refs[i]]
+            if state == 0x01 || state == 0x02
+                sample[i] = false
+                reasons[i] = state == 0x01 ? :fe_all_zero : :fe_all_one
+                removed += 1
+            end
+        end
+    end
+    return removed
+end
+
 ############################################################
 ### IRLS workspace for Fisher Scoring
 ############################################################
@@ -112,10 +154,13 @@ design columns. Buffers are uninitialized until filled by the fitting loop.
 - `z`: working response `eta + g / d`.
 - `M`: shared `n × (k + 1)` absorption buffer containing `[z X]`.
 - `cols`: views of the columns of `M` for the fixed-effect solver.
-- `resid`: temporary storage for recovering fixed-effect contributions;
+- `resid`: temporary storage for `h .* z` and recovering fixed-effect contributions;
   unlike `rr.resid`, this is not the response residual vector.
+- `hX`: weighted design buffer with size `n × k`.
+- `XtWX`, `XtWz`: normal-equation buffers with sizes `k × k` and `k`.
 
-All vector buffers have length `n`. Arithmetic in the formulas is elementwise.
+The response and residual buffers have length `n`. Arithmetic in the formulas
+is elementwise.
 """
 struct GLMWorkspace{T <: AbstractFloat, C <: AbstractVector{T}}
     g::Vector{T}       # response residual y - mu
@@ -124,7 +169,10 @@ struct GLMWorkspace{T <: AbstractFloat, C <: AbstractVector{T}}
     z::Vector{T}       # working response η + g/d
     M::Matrix{T}       # [working response | design], absorbed in place
     cols::Vector{C}    # views into M's columns for solve_residuals!
-    resid::Vector{T}   # z - Xβ, input to the fixed-effect contribution recovery
+    resid::Vector{T}   # scratch for weighted least squares and fixed-effect recovery
+    hX::Matrix{T}
+    XtWX::Matrix{T}
+    XtWz::Vector{T}
 end
 
 function GLMWorkspace(X::Matrix{T}) where {T <: AbstractFloat}
@@ -134,7 +182,8 @@ function GLMWorkspace(X::Matrix{T}) where {T <: AbstractFloat}
     cols = C[view(M, :, j) for j in 1:(k + 1)]
     return GLMWorkspace{T, C}(
         Vector{T}(undef, n), Vector{T}(undef, n), Vector{T}(undef, n), Vector{T}(undef, n),
-        M, cols, Vector{T}(undef, n))
+        M, cols, Vector{T}(undef, n), Matrix{T}(undef, n, k),
+        Matrix{T}(undef, k, k), Vector{T}(undef, k))
 end
 
 ############################################################
@@ -186,27 +235,42 @@ Solve `min_β Σ hᵢ (zᵢ - Xdᵢ'β)²` and write the coefficients into `beta
 `basis` selects retained columns; excluded coefficients are set to zero.
 
 Form the weighted normal equations and solve them with Cholesky factorization.
-The retained system must be positive definite. This function allocates temporary
-weighted arrays and normal-equation buffers; it does not perform absorption.
+The retained system must be positive definite. Optional scratch buffers `hz`,
+`hX`, `XtWX`, and `XtWz` are overwritten; omitted buffers are allocated. Buffers
+must match the input axes and must not alias the inputs. Inputs must use
+one-based indexing. Only `beta` and the scratch buffers are mutated.
 """
 function wls_absorbed!(beta::Vector{T}, Xd::AbstractMatrix{T}, z::AbstractVector{T},
-        h::Vector{T}, basis::BitVector) where {T <: AbstractFloat}
-    hz = h .* z
-    hX = h .* Xd
-    XtWX = Xd' * hX
-    XtWz = Xd' * hz
+        h::Vector{T}, basis::BitVector;
+        hz = similar(z), hX = similar(Xd),
+        XtWX = similar(beta, T, (length(beta), length(beta))),
+        XtWz = similar(beta)) where {T <: AbstractFloat}
+    Base.require_one_based_indexing(beta, Xd, z, h, basis, hz, hX, XtWX, XtWz)
+    axes(Xd, 1) == axes(z, 1) == axes(h, 1) == axes(hz, 1) ||
+        throw(DimensionMismatch("The design, response, weights, and weighted response buffer must have matching row axes"))
+    axes(Xd, 2) == axes(beta, 1) == axes(basis, 1) == axes(XtWz, 1) ||
+        throw(DimensionMismatch("The design, coefficients, basis, and normal-equation response buffer must have matching column axes"))
+    axes(hX) == axes(Xd) ||
+        throw(DimensionMismatch("The weighted design buffer must match the design axes"))
+    axes(XtWX) == (axes(Xd, 2), axes(Xd, 2)) ||
+        throw(DimensionMismatch("The normal-equation matrix buffer must match the design column axes"))
+    hz .= h .* z
+    hX .= h .* Xd
+    mul!(XtWX, Xd', hX)
+    mul!(XtWz, Xd', hz)
     # FE-collinear columns (basis[j] == false) are excluded from the solve: pin
     # their row/column to a unit diagonal with a zero right-hand side so their
     # coefficient comes back as zero.
-    @inbounds for j in axes(XtWX, 1)
+    for j in eachindex(beta, basis)
         if !basis[j]
-            XtWX[:, j] .= zero(T)
-            XtWX[j, :] .= zero(T)
+            view(XtWX, :, j) .= zero(T)
+            view(XtWX, j, :) .= zero(T)
             XtWX[j, j] = one(T)
             XtWz[j] = zero(T)
         end
     end
-    copyto!(beta, cholesky!(Symmetric(XtWX)) \ XtWz)
+    copyto!(beta, XtWz)
+    ldiv!(cholesky!(Symmetric(XtWX)), beta)
     return beta
 end
 
@@ -279,7 +343,8 @@ function _glm_irls!(m::BinaryEstimator, ws::GLMWorkspace, feM, has_fes::Bool,
             end
         end
 
-        wls_absorbed!(pp.beta_new, Xd, zd, ws.h, basis)
+        wls_absorbed!(pp.beta_new, Xd, zd, ws.h, basis;
+            hz = ws.resid, hX = ws.hX, XtWX = ws.XtWX, XtWz = ws.XtWz)
 
         if has_fes
             # The fixed-effect contribution to the linear predictor is the part of
@@ -338,6 +403,9 @@ the deviance, with at most 26 halvings per update.
 Without fixed effects, an explicit intercept is prepended to the design.
 With fixed effects, the constant is absorbed. Return a `BinaryEstimator` with
 coefficients, response buffers, formula metadata, and parameter counts.
+Remove observations in all-zero or all-one fixed-effect intercept groups
+recursively before fitting. `esample` and `drop_reasons` refer to the original
+rows; response and predictor buffers contain only the estimation sample.
 The last iterate is returned even when the iteration limit is reached.
 """
 function fit_glmfe(
@@ -351,14 +419,24 @@ function fit_glmfe(
 
     response_name, coef_names_str = get_coefficient_names_nofe(formula, data)
 
-    n = size(data, 1)
-    k = count(==(1), y)
-    Lnull = k * log(k / n) + (n - k) * log(1 - k / n)
-    nulldeviance = -2 * Lnull
-
     formula, formula_fes = parse_fe(formula)
     fes, feids, fekeys = parse_fixedeffect(data, formula_fes)
     has_fes = has_fe(formula_fes)
+
+    sample, drop_reasons = _binary_sample(y, fes)
+    n = count(sample)
+    n > 0 || throw(ArgumentError(
+        "No observations remain after removing constant-outcome fixed-effect groups"))
+    if !all(sample)
+        X = X[sample, :]
+        y = y[sample]
+        fes = FixedEffect[FixedEffect(fe.refs[sample]; interaction = fe.interaction[sample])
+                          for fe in fes]
+    end
+    k = count(==(1), y)
+    0 < k < n || throw(ArgumentError("Bernoulli response must contain both zeros and ones"))
+    Lnull = k * log(k / n) + (n - k) * log1p(-k / n)
+    nulldeviance = -2 * Lnull
 
     # Fixed effects absorb the constant; without them the model needs an explicit
     # intercept, which the fe-excluded model matrix does not carry.
@@ -388,7 +466,9 @@ function fit_glmfe(
         has_fes,
         0,
         coef_names_str,
-        trues(length(coef_names_str))
+        trues(length(coef_names_str)),
+        sample,
+        drop_reasons
     )
     m.deviance = deviance(m)
 

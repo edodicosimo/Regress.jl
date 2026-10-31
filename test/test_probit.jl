@@ -38,6 +38,10 @@
     ]
 
     @test coef(model) ≈ expected_coef atol = 1e-4
+    @test nobs(model) == 16312
+    @test count(!, model.esample) == 11014
+    @test all(==(:none), model.drop_reasons[model.esample])
+    @test all(!=(:none), model.drop_reasons[.!model.esample])
 end
 
 @testitem "Probit coefficients - RWM model variants" tags = [:probit, :fe] begin

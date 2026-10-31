@@ -43,7 +43,7 @@ function fit_regress_probit(df)
         link = ProbitLink(),
         beta0 = copy(PROBIT_BETA0),
         max_iter = 1000,
-        tolerance = 1e-6
+        tolerance = 1e-10
     )
 end
 
@@ -109,7 +109,7 @@ function fit_regress_logit(df)
         link = LogitLink(),
         beta0 = copy(PROBIT_BETA0),
         max_iter = 1000,
-        tolerance = 1e-6
+        tolerance = 1e-10
     )
 end
 
